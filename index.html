@@ -406,6 +406,7 @@ async function dbLoad(){
   state.settlements=st.sort((a,b)=>(b.settled_date||"").localeCompare(a.settled_date||"") || (b.created_at||"").localeCompare(a.created_at||""));
   state.categories=c; state.personal=p.sort(byDate);
   state.incomes=inc.sort((a,b)=>(b.income_date||"").localeCompare(a.income_date||""));
+  clearNetCache();
   state.budgets=bud; state.quick=qk; state.funds=fu;
   state.fundTxns=ftx.sort((a,b)=>(b.txn_date||"").localeCompare(a.txn_date||"") || (b.created_at||"").localeCompare(a.created_at||""));
 }
@@ -461,14 +462,61 @@ function settleEffect(mid){
   }
   return s;
 }
-/* Trả nợ được ghi chung cho 1 người, nên khi hiện số trong từng nhóm
-   ta phân bổ số đã trả về các nhóm theo tỷ lệ nợ — nhờ vậy vào nhóm
-   cũng thấy số đã giảm, và tổng các nhóm luôn khớp với tab Tổng quan. */
+
+/* ---- Phân bổ tiền trả nợ về từng nhóm ----
+   Trả nợ ghi chung cho 1 người, không gắn nhóm. Nên khi hiện số trong
+   từng nhóm, ta trừ dần từ KHOẢN CŨ NHẤT trước (giống cách trừ nợ ngoài
+   đời). Tổng các nhóm luôn khớp với số ở tab Tổng quan. */
+let _netCache={};
+function clearNetCache(){ _netCache={}; }
+function memberGroupNets(mid){
+  if(_netCache[mid]) return _netCache[mid];
+  const my=me();
+  const map=new Map();
+  if(!my){ _netCache[mid]=map; return map; }
+
+  const pos=[], neg=[];   // pos: họ nợ bạn | neg: bạn nợ họ
+  for(const e of state.expenses){
+    if(e.payer_id===my.id){
+      const sp=state.splits.find(x=>x.expense_id===e.id && x.member_id===mid);
+      if(sp && sp.amount) pos.push({gid:e.group_id, amt:sp.amount, date:e.expense_date||""});
+    }else if(e.payer_id===mid){
+      const sp=state.splits.find(x=>x.expense_id===e.id && x.member_id===my.id);
+      if(sp && sp.amount) neg.push({gid:e.group_id, amt:sp.amount, date:e.expense_date||""});
+    }
+  }
+  const byDate=(a,b)=>a.date.localeCompare(b.date);
+  pos.sort(byDate); neg.sort(byDate);
+
+  let recv=0, paid=0;
+  for(const st of state.settlements){
+    if(st.member_id!==mid) continue;
+    if(st.direction==="received") recv+=st.amount; else paid+=st.amount;
+  }
+  for(const c of pos){
+    const cut=Math.min(recv, c.amt); recv-=cut;
+    map.set(c.gid, (map.get(c.gid)||0) + (c.amt-cut));
+  }
+  for(const c of neg){
+    const cut=Math.min(paid, c.amt); paid-=cut;
+    map.set(c.gid, (map.get(c.gid)||0) - (c.amt-cut));
+  }
+  /* Nếu trả thừa so với số nợ, phần dư gán vào nhóm có khoản gần nhất
+     để tổng các nhóm luôn khớp tab Tổng quan. */
+  const globalNet=grossPair(mid)+settleEffect(mid);
+  let sum=0; for(const v of map.values()) sum+=v;
+  const resid=globalNet-sum;
+  if(resid!==0){
+    const last=[...pos,...neg].sort((a,b)=>b.date.localeCompare(a.date))[0];
+    const gid=last?last.gid:(state.groups[0]?.id);
+    if(gid) map.set(gid, (map.get(gid)||0)+resid);
+  }
+  _netCache[mid]=map;
+  return map;
+}
 function pairNet(mid, gid=null){
-  /* Nếu hỏi theo nhóm cụ thể: trả về số phát sinh thô trong nhóm đó,
-     KHÔNG trừ tiền trả nợ (trả nợ là global, không gắn với nhóm nào).
-     Nếu hỏi tổng (gid=null): trừ hết tiền đã trả → đây là số thực bạn dùng. */
-  return gid ? grossPair(mid, gid) : grossPair(mid) + settleEffect(mid);
+  if(!gid) return grossPair(mid)+settleEffect(mid);
+  return memberGroupNets(mid).get(gid)||0;
 }
 function involvedIn(gid){
   const my=me(); const ids=new Set(membersOf(gid).map(m=>m.id));
@@ -492,6 +540,7 @@ const TABS=[["tq","Tổng quan","📒"],["nhom","Nhóm","👥"],["canhan","Cá n
 function setTab(t){ state.ui.tab=t; render(); window.scrollTo(0,0); }
 function render(){
   if(!state.session) return;
+  clearNetCache();
   const t=state.ui.tab;
   let html="";
   if(t==="tq") html=viewTQ();
@@ -684,18 +733,18 @@ function viewGroupDetail(){
     <button class="btn" style="margin-bottom:14px" onclick="openExpenseModal('${g.id}')">＋ Thêm khoản chi</button>
     ${inv.length?`<div class="card"><div class="eyebrow" style="margin-bottom:2px">Sổ nợ trong nhóm</div>
       ${inv.map(x=>{
-        const netReal=pairNet(x.m.id);          /* net toàn cục đã trừ settlements */
-        const hasPaid=settleEffect(x.m.id)!==0;
+        const gross=grossPair(x.m.id, g.id);
+        const paidOff=gross-x.n;   /* phần đã trả được trừ vào nhóm này */
         return `<button class="row" onclick="openMemberSheet('${x.m.id}')">
           <div class="avatar" style="${avStyle(x.m.id)}">${esc(initials(x.m.name))}</div>
           <div class="rowmain name">${esc(x.m.name)}
-            ${hasPaid?`<div class="sub">phát sinh ${x.n>0?"+":""}${fmtPlain(x.n)} · <b style="color:${moneyClass(netReal)==='pos'?'var(--green)':moneyClass(netReal)==='neg'?'var(--red)':'var(--muted)'}">còn lại thực ${netReal>0?fmtPlain(netReal):netReal<0?"bạn nợ "+fmtPlain(-netReal):"đã xong ✓"}</b></div>`
-            :`<div class="sub">${x.n>0?"đang nợ bạn":x.n<0?"bạn đang nợ":"đã cân bằng"}</div>`}
+            ${paidOff!==0?`<div class="sub">phát sinh ${fmtPlain(Math.abs(gross))} · đã trả ${fmtPlain(Math.abs(paidOff))}</div>`
+                         :`<div class="sub">${x.n>0?"đang nợ bạn":x.n<0?"bạn đang nợ":"đã cân bằng"}</div>`}
           </div>
           <div class="leader"></div>
-          <span class="${moneyClass(netReal)}">${netReal===0?"✓":fmt(Math.abs(netReal))}</span>
+          <span class="${moneyClass(x.n)}">${x.n===0?"✓":fmt(Math.abs(x.n))}</span>
         </button>`;}).join("")}
-      <div class="caption-i">Số hiển thị là nợ thực sau khi trừ tất cả lần trả nợ (gộp mọi nhóm).</div></div>`:""}
+      <div class="caption-i">Tiền trả nợ được trừ dần từ khoản cũ nhất. Tổng các nhóm khớp với tab Tổng quan.</div></div>`:""}
     ${exps.length?expHtml:`<div class="card"><div class="empty"><span class="big-ic">🧾</span>Chưa có khoản chi nào trong nhóm này.</div></div>`}`;
 }
 
@@ -1513,10 +1562,7 @@ function viewSettings(){
         <div class="avatar" style="${avStyle(m.id)}">${esc(initials(m.name))}</div>
         <span class="name" style="flex:1">${esc(m.name)}${m.is_me?' <span class="sub">(bạn)</span>':""}</span>
         <button class="iconbtn" onclick="editMember('${m.id}')">✎</button>
-        ${m.is_me?"":pairNet(m.id)===0
-          ?`<button class="iconbtn red" onclick="delMemberFull('${m.id}')" title="Xoá + toàn bộ lịch sử">🗑✓</button>`
-          :`<button class="iconbtn red" onclick="delMember('${m.id}')" title="Chưa cân bằng — xoá sẽ bị chặn">🗑</button>`
-        }
+        ${m.is_me?"":`<button class="iconbtn red" onclick="openDeleteMember('${m.id}')">🗑</button>`}
       </div>`).join("")}
       <button class="btn btn-line" style="margin-top:10px" onclick="addMember()">＋ Thêm thành viên</button>
     </div>
@@ -1562,51 +1608,57 @@ async function addMember(){
   await run(sb.from("members").insert({name:r.name}));
   await dbLoad(); render(); toast(`Đã thêm ${r.name} ✓`);
 }
-async function delMember(mid){
-  const m=memberById(mid);
-  const net=pairNet(mid);
-  if(net!==0){
-    toast(`${m?.name||"Người này"} chưa cân bằng (còn ${fmtPlain(Math.abs(net))}). Hãy ghi nhận trả nợ đủ trước rồi xoá.`, true);
-    return;
+function memberTxnCount(mid){
+  const my=me();
+  let n=0;
+  for(const e of state.expenses){
+    if(e.payer_id===mid){ n++; continue; }
+    if(e.payer_id===my.id && state.splits.some(x=>x.expense_id===e.id && x.member_id===mid)) n++;
   }
-  if(!(await ask(`Xoá ${m?.name||"thành viên này"} khỏi sổ?`))) return;
-  const { error }=await sb.from("members").delete().eq("id", mid);
-  if(error){
-    toast(error.code==="23503"?"Người này còn giao dịch — dùng nút 🗑✓ để xoá cả lịch sử.":"Lỗi: "+error.message, true);
-    return;
-  }
-  await dbLoad(); render(); toast("Đã xoá");
+  n+=state.settlements.filter(x=>x.member_id===mid).length;
+  return n;
 }
-
-async function delMemberFull(mid){
-  const m=memberById(mid);
+function openDeleteMember(mid){
+  const m=memberById(mid); if(!m) return;
   const net=pairNet(mid);
-  const name=m?.name||"thành viên này";
-  let msg = net!==0
-    ? `${name} CHƯA cân bằng (còn ${fmtPlain(Math.abs(net))}).\n\nBạn chắc chắn muốn xoá và xoá TOÀN BỘ lịch sử?`
-    : `Xoá ${name} và toàn bộ lịch sử giao dịch của họ trong mọi nhóm?\n\nHành động này không thể hoàn tác.`;
-  if(!(await ask(msg,"Xoá tất cả"))) return;
-  try{
-    /* Xoá đúng thứ tự để không bị FK violation */
-    // 1. Tìm các expense mà member là payer
-    const payerExpIds=state.expenses.filter(e=>e.payer_id===mid).map(e=>e.id);
-    // 2. Xoá splits của member này
-    await run(sb.from("expense_splits").delete().eq("member_id",mid));
-    // 3. Nếu member là payer: xoá personal liên kết, splits người khác, rồi expense
-    for(const eid of payerExpIds){
-      await run(sb.from("personal_expenses").delete().eq("source_expense_id",eid));
-      await run(sb.from("expense_splits").delete().eq("expense_id",eid));
-      await run(sb.from("expenses").delete().eq("id",eid));
+  const cnt=memberTxnCount(mid);
+  const grs=state.groups.filter(g=>state.groupMembers.some(gm=>gm.group_id===g.id&&gm.member_id===mid));
+  const s=sheetOpen(`
+    <div class="sheethead">
+      <div style="display:flex;align-items:center;gap:11px">
+        <div class="avatar" style="${avStyle(mid)};width:44px;height:44px;font-size:18px">${esc(initials(m.name))}</div>
+        <div><div style="font-weight:800;font-size:18px">${esc(m.name)}</div>
+        <div class="sub">${cnt} giao dịch · ${grs.length} nhóm</div></div>
+      </div><button class="x" data-close>✕</button>
+    </div>
+    ${net!==0?`<div class="errbox">Chưa cân bằng: ${net>0?"còn nợ bạn":"bạn còn nợ họ"} <b>${fmtPlain(Math.abs(net))}</b>. Xoá bây giờ sẽ mất khoản này khỏi sổ.</div>`
+             :`<div class="note" style="margin:0 0 12px">✓ Đã cân bằng, xoá thoải mái.</div>`}
+    ${cnt?`<div class="note" style="margin:0 0 14px">Xoá sẽ gỡ luôn <b>${cnt} giao dịch</b> của ${esc(m.name)}: các khoản chi họ đứng ra trả, phần chia của họ trong khoản chi của bạn, và lịch sử trả nợ. Không hoàn tác được.</div>`:""}
+    <button class="btn btn-danger" id="dm-go">🗑 Xoá ${esc(m.name)} và toàn bộ lịch sử</button>
+    <button class="btn btn-ghost" id="dm-no" style="margin-top:10px">Huỷ</button>`);
+  s.el.querySelector("[data-close]").onclick=s.close;
+  s.el.querySelector("#dm-no").onclick=s.close;
+  s.el.querySelector("#dm-go").onclick=async ()=>{
+    const btn=s.el.querySelector("#dm-go");
+    btn.disabled=true; btn.textContent="Đang xoá…";
+    try{
+      const payerExpIds=state.expenses.filter(e=>e.payer_id===mid).map(e=>e.id);
+      await run(sb.from("expense_splits").delete().eq("member_id",mid));
+      for(const eid of payerExpIds){
+        await run(sb.from("personal_expenses").delete().eq("source_expense_id",eid));
+        await run(sb.from("expense_splits").delete().eq("expense_id",eid));
+        await run(sb.from("expenses").delete().eq("id",eid));
+      }
+      await run(sb.from("settlements").delete().eq("member_id",mid));
+      await run(sb.from("group_members").delete().eq("member_id",mid));
+      await run(sb.from("members").delete().eq("id",mid));
+      await dbLoad(); closeAllSheets(); render();
+      toast(`Đã xoá ${m.name} và toàn bộ lịch sử ✓`);
+    }catch(e){
+      btn.disabled=false; btn.textContent="🗑 Thử lại";
+      toast("Lỗi khi xoá: "+(e.message||e), true);
     }
-    // 4. Xoá settlements
-    await run(sb.from("settlements").delete().eq("member_id",mid));
-    // 5. Xoá group_members
-    await run(sb.from("group_members").delete().eq("member_id",mid));
-    // 6. Xoá member
-    await run(sb.from("members").delete().eq("id",mid));
-    await dbLoad(); render();
-    toast(`Đã xoá ${name} và toàn bộ lịch sử ✓`);
-  }catch(e){ toast("Lỗi khi xoá: "+e.message,true); }
+  };
 }
 async function editCategory(cid){
   const c=catById(cid); if(!c) return;
