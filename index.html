@@ -683,11 +683,19 @@ function viewGroupDetail(){
     </div>
     <button class="btn" style="margin-bottom:14px" onclick="openExpenseModal('${g.id}')">＋ Thêm khoản chi</button>
     ${inv.length?`<div class="card"><div class="eyebrow" style="margin-bottom:2px">Sổ nợ trong nhóm</div>
-      ${inv.map(x=>`<button class="row" onclick="openMemberSheet('${x.m.id}')">
-        <div class="avatar" style="${avStyle(x.m.id)}">${esc(initials(x.m.name))}</div>
-        <span class="name">${esc(x.m.name)}</span><div class="leader"></div>
-        <span class="${moneyClass(x.n)}">${x.n===0?"✓":fmt(Math.abs(x.n))}</span></button>`).join("")}
-      <div class="caption-i">Số phát sinh trong nhóm này. Số thực sau khi trừ trả nợ xem ở tab Tổng quan.</div></div>`:""}
+      ${inv.map(x=>{
+        const netReal=pairNet(x.m.id);          /* net toàn cục đã trừ settlements */
+        const hasPaid=settleEffect(x.m.id)!==0;
+        return `<button class="row" onclick="openMemberSheet('${x.m.id}')">
+          <div class="avatar" style="${avStyle(x.m.id)}">${esc(initials(x.m.name))}</div>
+          <div class="rowmain name">${esc(x.m.name)}
+            ${hasPaid?`<div class="sub">phát sinh ${x.n>0?"+":""}${fmtPlain(x.n)} · <b style="color:${moneyClass(netReal)==='pos'?'var(--green)':moneyClass(netReal)==='neg'?'var(--red)':'var(--muted)'}">còn lại thực ${netReal>0?fmtPlain(netReal):netReal<0?"bạn nợ "+fmtPlain(-netReal):"đã xong ✓"}</b></div>`
+            :`<div class="sub">${x.n>0?"đang nợ bạn":x.n<0?"bạn đang nợ":"đã cân bằng"}</div>`}
+          </div>
+          <div class="leader"></div>
+          <span class="${moneyClass(netReal)}">${netReal===0?"✓":fmt(Math.abs(netReal))}</span>
+        </button>`;}).join("")}
+      <div class="caption-i">Số hiển thị là nợ thực sau khi trừ tất cả lần trả nợ (gộp mọi nhóm).</div></div>`:""}
     ${exps.length?expHtml:`<div class="card"><div class="empty"><span class="big-ic">🧾</span>Chưa có khoản chi nào trong nhóm này.</div></div>`}`;
 }
 
@@ -1505,7 +1513,10 @@ function viewSettings(){
         <div class="avatar" style="${avStyle(m.id)}">${esc(initials(m.name))}</div>
         <span class="name" style="flex:1">${esc(m.name)}${m.is_me?' <span class="sub">(bạn)</span>':""}</span>
         <button class="iconbtn" onclick="editMember('${m.id}')">✎</button>
-        ${m.is_me?"":`<button class="iconbtn red" onclick="delMember('${m.id}')">🗑</button>`}
+        ${m.is_me?"":pairNet(m.id)===0
+          ?`<button class="iconbtn red" onclick="delMemberFull('${m.id}')" title="Xoá + toàn bộ lịch sử">🗑✓</button>`
+          :`<button class="iconbtn red" onclick="delMember('${m.id}')" title="Chưa cân bằng — xoá sẽ bị chặn">🗑</button>`
+        }
       </div>`).join("")}
       <button class="btn btn-line" style="margin-top:10px" onclick="addMember()">＋ Thêm thành viên</button>
     </div>
@@ -1553,13 +1564,49 @@ async function addMember(){
 }
 async function delMember(mid){
   const m=memberById(mid);
+  const net=pairNet(mid);
+  if(net!==0){
+    toast(`${m?.name||"Người này"} chưa cân bằng (còn ${fmtPlain(Math.abs(net))}). Hãy ghi nhận trả nợ đủ trước rồi xoá.`, true);
+    return;
+  }
   if(!(await ask(`Xoá ${m?.name||"thành viên này"} khỏi sổ?`))) return;
   const { error }=await sb.from("members").delete().eq("id", mid);
   if(error){
-    toast(error.code==="23503"?"Không xoá được: người này đã có giao dịch trong sổ.":"Lỗi: "+error.message, true);
+    toast(error.code==="23503"?"Người này còn giao dịch — dùng nút 🗑✓ để xoá cả lịch sử.":"Lỗi: "+error.message, true);
     return;
   }
   await dbLoad(); render(); toast("Đã xoá");
+}
+
+async function delMemberFull(mid){
+  const m=memberById(mid);
+  const net=pairNet(mid);
+  const name=m?.name||"thành viên này";
+  let msg = net!==0
+    ? `${name} CHƯA cân bằng (còn ${fmtPlain(Math.abs(net))}).\n\nBạn chắc chắn muốn xoá và xoá TOÀN BỘ lịch sử?`
+    : `Xoá ${name} và toàn bộ lịch sử giao dịch của họ trong mọi nhóm?\n\nHành động này không thể hoàn tác.`;
+  if(!(await ask(msg,"Xoá tất cả"))) return;
+  try{
+    /* Xoá đúng thứ tự để không bị FK violation */
+    // 1. Tìm các expense mà member là payer
+    const payerExpIds=state.expenses.filter(e=>e.payer_id===mid).map(e=>e.id);
+    // 2. Xoá splits của member này
+    await run(sb.from("expense_splits").delete().eq("member_id",mid));
+    // 3. Nếu member là payer: xoá personal liên kết, splits người khác, rồi expense
+    for(const eid of payerExpIds){
+      await run(sb.from("personal_expenses").delete().eq("source_expense_id",eid));
+      await run(sb.from("expense_splits").delete().eq("expense_id",eid));
+      await run(sb.from("expenses").delete().eq("id",eid));
+    }
+    // 4. Xoá settlements
+    await run(sb.from("settlements").delete().eq("member_id",mid));
+    // 5. Xoá group_members
+    await run(sb.from("group_members").delete().eq("member_id",mid));
+    // 6. Xoá member
+    await run(sb.from("members").delete().eq("id",mid));
+    await dbLoad(); render();
+    toast(`Đã xoá ${name} và toàn bộ lịch sử ✓`);
+  }catch(e){ toast("Lỗi khi xoá: "+e.message,true); }
 }
 async function editCategory(cid){
   const c=catById(cid); if(!c) return;
