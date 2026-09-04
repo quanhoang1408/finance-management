@@ -464,22 +464,11 @@ function settleEffect(mid){
 /* Trả nợ được ghi chung cho 1 người, nên khi hiện số trong từng nhóm
    ta phân bổ số đã trả về các nhóm theo tỷ lệ nợ — nhờ vậy vào nhóm
    cũng thấy số đã giảm, và tổng các nhóm luôn khớp với tab Tổng quan. */
-function pairNetInGroup(mid, gid){
-  const gross=grossPair(mid, gid);
-  const eff=settleEffect(mid);
-  if(!eff) return gross;
-  /* Chỉ phân bổ tiền trả vào các nhóm mà họ ĐANG NỢ bạn (gross > 0).
-     Nhóm bạn đang nợ ngược (gross < 0) không bị đụng tới. */
-  let posTotal=0;
-  for(const g of state.groups){
-    const gv=grossPair(mid, g.id);
-    if(gv>0) posTotal+=gv;
-  }
-  if(!posTotal || gross<=0) return gross;
-  return Math.round(gross + eff*(gross/posTotal));
-}
 function pairNet(mid, gid=null){
-  return gid ? pairNetInGroup(mid, gid) : grossPair(mid)+settleEffect(mid);
+  /* Nếu hỏi theo nhóm cụ thể: trả về số phát sinh thô trong nhóm đó,
+     KHÔNG trừ tiền trả nợ (trả nợ là global, không gắn với nhóm nào).
+     Nếu hỏi tổng (gid=null): trừ hết tiền đã trả → đây là số thực bạn dùng. */
+  return gid ? grossPair(mid, gid) : grossPair(mid) + settleEffect(mid);
 }
 function involvedIn(gid){
   const my=me(); const ids=new Set(membersOf(gid).map(m=>m.id));
@@ -594,8 +583,9 @@ function openMemberSheet(mid){
       <button class="btn btn-ghost" data-act="paid">Bạn trả họ</button>
     </div>
     ${net>0?`<button class="btn btn-ghost" id="ms-remind" style="margin-top:10px">💬 Soạn tin nhắc nợ</button>`:""}
-    ${perGroup.length?`<div class="card" style="margin-top:14px"><div class="eyebrow" style="margin-bottom:4px">Theo nhóm</div>
-      ${perGroup.map(x=>`<div class="row" style="cursor:default">${x.g.icon} <span class="name">${esc(x.g.name)}</span><div class="leader"></div><span class="${moneyClass(x.n)}">${fmt(Math.abs(x.n))}</span></div>`).join("")}</div>`:""}
+    ${perGroup.length?`<div class="card" style="margin-top:14px"><div class="eyebrow" style="margin-bottom:4px">Phát sinh theo nhóm (chưa trừ trả nợ)</div>
+      ${perGroup.map(x=>`<div class="row" style="cursor:default">${x.g.icon} <span class="name">${esc(x.g.name)}</span><div class="leader"></div><span class="${moneyClass(x.n)}">${fmt(Math.abs(x.n))}</span></div>`).join("")}
+      <div class="caption-i">Số thực (đã trừ trả nợ) là ${fmt(Math.abs(net))} ở trên.</div></div>`:""}
     ${hist.length?`<div class="card" style="margin-top:14px"><div class="eyebrow" style="margin-bottom:4px">Lịch sử</div>
       ${hist.map(h=>`<div class="row" style="cursor:default">
         <div class="rowmain name">${esc(h.label)}<div class="sub">${dmyFull(h.date)} · ${esc(h.sub)}</div></div>
@@ -697,7 +687,7 @@ function viewGroupDetail(){
         <div class="avatar" style="${avStyle(x.m.id)}">${esc(initials(x.m.name))}</div>
         <span class="name">${esc(x.m.name)}</span><div class="leader"></div>
         <span class="${moneyClass(x.n)}">${x.n===0?"✓":fmt(Math.abs(x.n))}</span></button>`).join("")}
-      <div class="caption-i">Đã trừ các lần trả nợ. Tổng các nhóm khớp với số ở tab Tổng quan.</div></div>`:""}
+      <div class="caption-i">Số phát sinh trong nhóm này. Số thực sau khi trừ trả nợ xem ở tab Tổng quan.</div></div>`:""}
     ${exps.length?expHtml:`<div class="card"><div class="empty"><span class="big-ic">🧾</span>Chưa có khoản chi nào trong nhóm này.</div></div>`}`;
 }
 
