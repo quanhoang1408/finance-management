@@ -632,9 +632,13 @@ function openMemberSheet(mid){
       <button class="btn btn-ghost" data-act="paid">Bạn trả họ</button>
     </div>
     ${net>0?`<button class="btn btn-ghost" id="ms-remind" style="margin-top:10px">💬 Soạn tin nhắc nợ</button>`:""}
-    ${perGroup.length?`<div class="card" style="margin-top:14px"><div class="eyebrow" style="margin-bottom:4px">Phát sinh theo nhóm (chưa trừ trả nợ)</div>
-      ${perGroup.map(x=>`<div class="row" style="cursor:default">${x.g.icon} <span class="name">${esc(x.g.name)}</span><div class="leader"></div><span class="${moneyClass(x.n)}">${fmt(Math.abs(x.n))}</span></div>`).join("")}
-      <div class="caption-i">Số thực (đã trừ trả nợ) là ${fmt(Math.abs(net))} ở trên.</div></div>`:""}
+    ${perGroup.length?`<div class="card" style="margin-top:14px"><div class="eyebrow" style="margin-bottom:4px">Còn nợ ở nhóm nào</div>
+      ${perGroup.map(x=>{
+        const gr=grossPair(mid, x.g.id);
+        return `<div class="row" style="cursor:default">${x.g.icon}
+          <div class="rowmain name">${esc(x.g.name)}${gr!==x.n?`<div class="sub">phát sinh ${fmtPlain(Math.abs(gr))}</div>`:""}</div>
+          <div class="leader"></div><span class="${moneyClass(x.n)}">${fmt(Math.abs(x.n))}</span></div>`;}).join("")}
+      <div class="caption-i">Đã trừ trả nợ (trừ từ khoản cũ nhất). Cộng lại đúng bằng ${fmt(Math.abs(net))} ở trên.</div></div>`:""}
     ${hist.length?`<div class="card" style="margin-top:14px"><div class="eyebrow" style="margin-bottom:4px">Lịch sử</div>
       ${hist.map(h=>`<div class="row" style="cursor:default">
         <div class="rowmain name">${esc(h.label)}<div class="sub">${dmyFull(h.date)} · ${esc(h.sub)}</div></div>
