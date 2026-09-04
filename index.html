@@ -468,10 +468,15 @@ function pairNetInGroup(mid, gid){
   const gross=grossPair(mid, gid);
   const eff=settleEffect(mid);
   if(!eff) return gross;
-  let tot=0;
-  for(const g of state.groups) tot+=Math.abs(grossPair(mid, g.id));
-  if(!tot) return gross;
-  return Math.round(gross + eff*Math.abs(gross)/tot);
+  /* Chỉ phân bổ tiền trả vào các nhóm mà họ ĐANG NỢ bạn (gross > 0).
+     Nhóm bạn đang nợ ngược (gross < 0) không bị đụng tới. */
+  let posTotal=0;
+  for(const g of state.groups){
+    const gv=grossPair(mid, g.id);
+    if(gv>0) posTotal+=gv;
+  }
+  if(!posTotal || gross<=0) return gross;
+  return Math.round(gross + eff*(gross/posTotal));
 }
 function pairNet(mid, gid=null){
   return gid ? pairNetInGroup(mid, gid) : grossPair(mid)+settleEffect(mid);
