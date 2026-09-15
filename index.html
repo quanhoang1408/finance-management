@@ -116,8 +116,8 @@ select.in{appearance:none;background:#fff url('data:image/svg+xml,<svg xmlns="ht
 #tabbar{position:fixed;bottom:0;left:0;right:0;z-index:50;display:flex;justify-content:center;pointer-events:none}
 .tabin{pointer-events:auto;display:flex;width:100%;max-width:520px;background:rgba(255,255,255,.93);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
 .tab{flex:1;min-width:0;border:0;background:none;padding:9px 2px 7px;text-align:center;cursor:pointer;color:var(--muted)}
-.tab .ic{font-size:21px;display:block;filter:grayscale(1);opacity:.55}
-.tab .tl{font-size:10px;font-weight:700;margin-top:2px;display:block}
+.tab .ic{font-size:19px;display:block;filter:grayscale(1);opacity:.55}
+.tab .tl{font-size:9px;font-weight:700;margin-top:2px;display:block}
 .tab.on{color:var(--green)}
 .tab.on .ic{filter:none;opacity:1}
 
@@ -188,7 +188,8 @@ const state = {
   expenses: [], splits: [], settlements: [],
   categories: [], personal: [],
   incomes: [], budgets: [], quick: [], funds: [], fundTxns: [],
-  ui: { tab: "tq", groupId: null, fundId: null, month: curMonth() }
+  schedule: [], skips: [],
+  ui: { tab: "tq", groupId: null, fundId: null, month: curMonth(), weekStart: null }
 };
 
 /* ================= TIỆN ÍCH ================= */
@@ -385,7 +386,7 @@ async function run(q){
   return data;
 }
 async function dbLoad(){
-  const [m,g,gm,e,s,st,c,p,inc,bud,qk,fu,ftx] = await Promise.all([
+  const [m,g,gm,e,s,st,c,p,inc,bud,qk,fu,ftx,sch,skp] = await Promise.all([
     run(sb.from("members").select("*")),
     run(sb.from("groups").select("*").order("created_at")),
     run(sb.from("group_members").select("*")),
@@ -398,7 +399,9 @@ async function dbLoad(){
     run(sb.from("budgets").select("*")),
     run(sb.from("quick_items").select("*").order("sort")),
     run(sb.from("funds").select("*").order("created_at")),
-    run(sb.from("fund_txns").select("*"))
+    run(sb.from("fund_txns").select("*")),
+    run(sb.from("schedule_items").select("*")),
+    run(sb.from("schedule_skips").select("*"))
   ]);
   const byDate=(a,b)=>(b.expense_date||"").localeCompare(a.expense_date||"") || (b.created_at||"").localeCompare(a.created_at||"");
   state.members=m; state.groups=g; state.groupMembers=gm;
@@ -408,6 +411,7 @@ async function dbLoad(){
   state.incomes=inc.sort((a,b)=>(b.income_date||"").localeCompare(a.income_date||""));
   clearNetCache();
   state.budgets=bud; state.quick=qk; state.funds=fu;
+  state.schedule=sch; state.skips=skp;
   state.fundTxns=ftx.sort((a,b)=>(b.txn_date||"").localeCompare(a.txn_date||"") || (b.created_at||"").localeCompare(a.created_at||""));
 }
 async function ensureMe(){
@@ -536,7 +540,7 @@ function hasActivity(mid){
 }
 
 /* ================= KHUNG CHÍNH ================= */
-const TABS=[["tq","Tổng quan","📒"],["nhom","Nhóm","👥"],["canhan","Cá nhân","💳"],["quy","Quỹ","🏦"],["khac","Khác","⚙️"]];
+const TABS=[["tq","Tổng quan","📒"],["nhom","Nhóm","👥"],["canhan","Cá nhân","💳"],["quy","Quỹ","🏦"],["lich","Lịch","📅"],["khac","Khác","⚙️"]];
 function setTab(t){ state.ui.tab=t; render(); window.scrollTo(0,0); }
 function render(){
   if(!state.session) return;
@@ -547,6 +551,7 @@ function render(){
   else if(t==="nhom") html= state.ui.groupId ? viewGroupDetail() : viewGroups();
   else if(t==="canhan") html=viewPersonal();
   else if(t==="quy") html= state.ui.fundId ? viewFundDetail() : viewFunds();
+  else if(t==="lich") html=viewSchedule();
   else html=viewSettings();
   app().innerHTML=html;
   $("#tabbar").innerHTML=`<div class="tabin">${TABS.map(([id,label,ic])=>`
@@ -1118,7 +1123,13 @@ function viewPersonal(){
     hist+=`<div class="dayhead">${dayLabel(d)}</div><div class="card" style="padding:4px 16px">`;
     for(const p of byDay[d]){
       const c=catById(p.category_id);
-      const tag = p.source_expense_id ? " · từ chi nhóm" : "";
+      let tag="";
+      if(p.source_expense_id) tag=" · từ chi nhóm";
+      else if(p.pair_id){
+        const o=state.personal.find(x=>x.pair_id===p.pair_id && x.id!==p.id);
+        const oc=o?catById(o.category_id):null;
+        tag = oc ? ` · chia đôi với ${oc.name}` : " · chia đôi";
+      }
       hist+=`<button class="row" onclick="openPersonalModal('${p.id}')">
         <div class="avatar av-g" style="font-size:17px">${c?esc(c.icon):"🏷️"}</div>
         <div class="rowmain name">${esc(p.description||c?.name||"Chi tiêu")}<div class="sub">${c?esc(c.name):"Chưa phân loại"}${tag}</div></div>
@@ -1146,16 +1157,46 @@ function viewPersonal(){
     ${list.length?hist:`<div class="card"><div class="empty"><span class="big-ic">☕</span>Chưa ghi khoản chi nào trong ${monthLabel(mo).toLowerCase()}.</div></div>`}`;
 }
 
+function uuid(){
+  if(crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{
+    const r=Math.random()*16|0; return (c==="x"?r:(r&0x3|0x8)).toString(16); });
+}
+/* danh mục "người yêu" để mặc định cho phần chia đôi */
+function loverCat(){
+  return state.categories.find(c=>/người yêu|ngươi yeu|nguoi yeu/i.test(c.name))
+      || state.categories.find(c=>c.icon==="💘") || null;
+}
+function pairOf(p){
+  if(!p || !p.pair_id) return null;
+  return state.personal.find(x=>x.pair_id===p.pair_id && x.id!==p.id) || null;
+}
+
 function openPersonalModal(pid){
-  const p = pid ? state.personal.find(x=>x.id===pid) : null;
+  const clicked = pid ? state.personal.find(x=>x.id===pid) : null;
+  /* nếu bấm vào nửa "người yêu" thì vẫn mở đúng khoản gốc */
+  let p=clicked;
+  if(clicked && clicked.pair_id && clicked.pair_primary===false){
+    p = state.personal.find(x=>x.pair_id===clicked.pair_id && x.pair_primary!==false) || clicked;
+  }
+  const partner = pairOf(p);
+  const linked = !!p?.source_expense_id;
+
   const lastCat=localStorage.getItem(LASTCAT_KEY);
   let catId = p?.category_id || (state.categories.some(c=>c.id===lastCat)?lastCat:state.categories[0]?.id) || null;
+  const lover=loverCat();
+  let splitOn = !!partner;
+  let partnerCatId = partner?.category_id || lover?.id || state.categories[0]?.id || null;
+  let partnerAmt = partner?partner.amount:0;
+  let pTouched = !!partner;
+  const totalInit = (p?p.amount:0) + (partner?partner.amount:0);
+
   const s=sheetOpen(`
     <div class="sheethead"><div class="h1">${p?"Sửa chi tiêu":"Chi tiêu mới"}</div><button class="x" data-close>✕</button></div>
-    ${p?.source_expense_id?`<div class="note" style="margin:0 0 12px">🔗 Khoản này được cộng từ một khoản chi nhóm. Sửa khoản chi trong nhóm sẽ cập nhật lại số tiền ở đây.</div>`:""}
+    ${linked?`<div class="note" style="margin:0 0 12px">🔗 Khoản này được cộng từ một khoản chi nhóm. Sửa khoản chi trong nhóm sẽ cập nhật lại số tiền ở đây.</div>`:""}
     <div class="field" style="display:flex;gap:10px">
-      <div style="flex:1.3"><label class="lbl">Số tiền</label>
-        <input class="in" id="p-amt" inputmode="numeric" placeholder="0" value="${p?NF.format(p.amount):""}" style="font-weight:800;font-size:19px"></div>
+      <div style="flex:1.3"><label class="lbl">Số tiền${partner?" (cả hai phần)":""}</label>
+        <input class="in" id="p-amt" inputmode="numeric" placeholder="0" value="${totalInit?NF.format(totalInit):""}" style="font-weight:800;font-size:19px"></div>
       <div style="flex:1"><label class="lbl">Ngày</label>
         <input class="in" id="p-date" type="date" value="${p?p.expense_date:todayStr()}"></div>
     </div>
@@ -1163,34 +1204,105 @@ function openPersonalModal(pid){
       <div class="chips" id="p-cats">${state.categories.map(c=>`
         <button class="chip ${c.id===catId?"on":""}" data-c="${c.id}">${esc(c.icon)} ${esc(c.name)}</button>`).join("")}</div></div>
     <div class="field"><label class="lbl">Ghi chú (không bắt buộc)</label>
-      <input class="in" id="p-desc" placeholder="VD: Trà sữa full topping" value="${esc(p?.description||"")}"></div>
-    <button class="btn" id="p-save">${p?"Lưu thay đổi":"Ghi vào sổ"}</button>
-    ${p?`<button class="btn btn-danger" id="p-del" style="margin-top:10px">Xoá khoản này</button>`:""}
+      <input class="in" id="p-desc" placeholder="VD: Ăn tối với người yêu" value="${esc(p?.description||"")}"></div>
+
+    ${linked?"":`<div class="mybox" id="p-splitbox">
+      <label><input type="checkbox" id="p-split" ${splitOn?"checked":""}>
+        <span>Chia đôi khoản này sang mục khác <span class="sub" style="font-weight:400">(VD đi với người yêu: nửa vào Ăn uống, nửa vào Người yêu)</span></span></label>
+      <div id="p-splitdetail" style="${splitOn?"":"display:none"};margin-top:12px">
+        <label class="lbl">Nửa còn lại vào mục</label>
+        <select class="in" id="p-pcat">${state.categories.map(c=>`
+          <option value="${c.id}" ${c.id===partnerCatId?"selected":""}>${esc(c.icon)} ${esc(c.name)}</option>`).join("")}</select>
+        <label class="lbl" style="margin-top:10px">Số tiền phần đó</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input class="in" id="p-pamt" inputmode="numeric" placeholder="0" style="flex:1;font-weight:700">
+          <button class="link" id="p-half" style="flex-shrink:0">½ Chia đều</button>
+        </div>
+        <div class="sumline" style="border-top-width:1px"><span id="p-sp1">—</span><span id="p-sp2">—</span></div>
+      </div>
+    </div>`}
+    <button class="btn" id="p-save" style="margin-top:14px">${p?"Lưu thay đổi":"Ghi vào sổ"}</button>
+    ${p?`<button class="btn btn-danger" id="p-del" style="margin-top:10px">Xoá khoản này${partner?" (cả 2 phần)":""}</button>`:""}
   `);
-  s.el.querySelector("[data-close]").onclick=s.close;
-  bindMoney(s.el.querySelector("#p-amt"));
+  const el=id=>s.el.querySelector(id);
+  el("[data-close]").onclick=s.close;
+
+  const amtInp=el("#p-amt");
+  const pamtInp=el("#p-pamt");
+  const catName=id=>{ const c=catById(id); return c?c.icon+" "+c.name:"—"; };
+
+  const recompute=()=>{
+    if(!pamtInp) return;
+    const total=getMoney(amtInp);
+    if(!splitOn){ el("#p-splitdetail").style.display="none"; return; }
+    el("#p-splitdetail").style.display="";
+    if(!pTouched){
+      partnerAmt=Math.floor(total/2);
+      pamtInp.value=partnerAmt?NF.format(partnerAmt):"";
+      pamtInp.dataset.raw=partnerAmt;
+    }
+    partnerAmt=Math.min(getMoney(pamtInp), total);
+    const mine=total-partnerAmt;
+    el("#p-sp1").textContent=`${catName(catId)}: ${fmtPlain(mine)}`;
+    el("#p-sp2").textContent=`${catName(partnerCatId)}: ${fmtPlain(partnerAmt)}`;
+    el("#p-sp1").className = mine>0?"sum-ok":"sum-bad";
+    el("#p-sp2").className = partnerAmt>0?"sum-ok":"sum-bad";
+  };
+  bindMoney(amtInp, recompute);
+  if(pamtInp){
+    if(partner){ pamtInp.value=NF.format(partnerAmt); pamtInp.dataset.raw=partnerAmt; }
+    bindMoney(pamtInp, ()=>{ pTouched=true; recompute(); });
+    el("#p-split").onchange=e=>{ splitOn=e.target.checked; if(!splitOn) pTouched=false; recompute(); };
+    el("#p-pcat").onchange=e=>{ partnerCatId=e.target.value; recompute(); };
+    el("#p-half").onclick=()=>{ pTouched=false; recompute(); };
+  }
   s.el.querySelectorAll("#p-cats .chip").forEach(b=>b.onclick=()=>{
     catId=b.dataset.c;
     s.el.querySelectorAll("#p-cats .chip").forEach(x=>x.classList.toggle("on",x===b));
+    recompute();
   });
-  setTimeout(()=>{ if(!p) s.el.querySelector("#p-amt").focus(); }, 60);
-  s.el.querySelector("#p-save").onclick=async ()=>{
-    const amt=getMoney(s.el.querySelector("#p-amt"));
-    if(!amt) return toast("Nhập số tiền đã nhé", true);
-    const btn=s.el.querySelector("#p-save"); btn.disabled=true;
+  recompute();
+  setTimeout(()=>{ if(!p) amtInp.focus(); }, 60);
+
+  el("#p-save").onclick=async ()=>{
+    const total=getMoney(amtInp);
+    if(!total) return toast("Nhập số tiền đã nhé", true);
+    const desc=el("#p-desc").value.trim()||null;
+    const date=el("#p-date").value||todayStr();
+    if(splitOn){
+      if(partnerAmt<=0) return toast("Phần chia sang mục kia phải lớn hơn 0", true);
+      if(partnerAmt>=total) return toast("Phần chia phải nhỏ hơn tổng tiền", true);
+      if(partnerCatId===catId) return toast("Chọn 2 danh mục khác nhau nhé", true);
+    }
+    const btn=el("#p-save"); btn.disabled=true;
     try{
-      const pp={ amount:amt, category_id:catId, description:s.el.querySelector("#p-desc").value.trim()||null,
-                 expense_date:s.el.querySelector("#p-date").value||todayStr() };
       if(catId) localStorage.setItem(LASTCAT_KEY, catId);
-      if(p) await run(sb.from("personal_expenses").update(pp).eq("id", p.id));
-      else await run(sb.from("personal_expenses").insert(pp));
-      await dbLoad(); closeAllSheets(); render(); toast("Đã ghi vào sổ ✓");
+      if(splitOn){
+        const pairId = p?.pair_id || uuid();
+        const mine={ amount:total-partnerAmt, category_id:catId, description:desc, expense_date:date,
+                     pair_id:pairId, pair_primary:true };
+        const other={ amount:partnerAmt, category_id:partnerCatId, description:desc, expense_date:date,
+                      pair_id:pairId, pair_primary:false };
+        if(p) await run(sb.from("personal_expenses").update(mine).eq("id", p.id));
+        else await run(sb.from("personal_expenses").insert(mine));
+        if(partner) await run(sb.from("personal_expenses").update(other).eq("id", partner.id));
+        else await run(sb.from("personal_expenses").insert(other));
+      }else{
+        const one={ amount:total, category_id:catId, description:desc, expense_date:date,
+                    pair_id:null, pair_primary:true };
+        if(p) await run(sb.from("personal_expenses").update(one).eq("id", p.id));
+        else await run(sb.from("personal_expenses").insert(one));
+        if(partner) await run(sb.from("personal_expenses").delete().eq("id", partner.id));
+      }
+      await dbLoad(); closeAllSheets(); render();
+      toast(splitOn?"Đã ghi 2 phần vào sổ ✓":"Đã ghi vào sổ ✓");
     }catch(e){ btn.disabled=false; }
   };
-  const del=s.el.querySelector("#p-del");
+  const del=el("#p-del");
   if(del) del.onclick=async ()=>{
-    if(!(await ask("Xoá khoản chi tiêu này?"))) return;
-    await run(sb.from("personal_expenses").delete().eq("id", p.id));
+    if(!(await ask(partner?"Xoá khoản này? Cả 2 phần đã chia đều bị xoá.":"Xoá khoản chi tiêu này?"))) return;
+    if(p.pair_id) await run(sb.from("personal_expenses").delete().eq("pair_id", p.pair_id));
+    else await run(sb.from("personal_expenses").delete().eq("id", p.id));
     await dbLoad(); closeAllSheets(); render(); toast("Đã xoá");
   };
 }
@@ -1546,6 +1658,180 @@ function openRemindSheet(mid){
   };
 }
 
+/* ================= LỊCH TRÌNH THEO TUẦN ================= */
+const WD_SHORT=["CN","T2","T3","T4","T5","T6","T7"];
+const WD_LONG=["Chủ nhật","Thứ hai","Thứ ba","Thứ tư","Thứ năm","Thứ sáu","Thứ bảy"];
+const SCH_ICONS=["📌","💼","🏋️","⚽","🚴","📚","💘","🍽️","🎬","🩺","✈️","🎂","🧹","💸"];
+
+function dstr(x){ return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,"0")}-${String(x.getDate()).padStart(2,"0")}`; }
+function addDays(ds,n){ const x=new Date(ds+"T12:00:00"); x.setDate(x.getDate()+n); return dstr(x); }
+function mondayOf(ds){ const x=new Date(ds+"T12:00:00"); const w=(x.getDay()+6)%7; x.setDate(x.getDate()-w); return dstr(x); }
+function wdOf(ds){ return new Date(ds+"T12:00:00").getDay(); }
+function hhmm(t){ return t? String(t).slice(0,5) : ""; }
+function weekStart(){ return state.ui.weekStart || (state.ui.weekStart=mondayOf(todayStr())); }
+function changeWeek(delta){ state.ui.weekStart=addDays(weekStart(), delta*7); render(); window.scrollTo(0,0); }
+function thisWeek(){ state.ui.weekStart=mondayOf(todayStr()); render(); }
+
+function scheduleFor(ds){
+  const wd=wdOf(ds);
+  const skipped=new Set(state.skips.filter(k=>k.skip_date===ds).map(k=>k.item_id));
+  const out=[];
+  for(const it of state.schedule){
+    if(it.repeat_kind==="once"){ if(it.event_date===ds) out.push(it); }
+    else if(it.active!==false && it.weekday===wd && !skipped.has(it.id)) out.push(it);
+  }
+  return out.sort((a,b)=>(a.start_time||"99:99").localeCompare(b.start_time||"99:99"));
+}
+function upcoming(limit=3){
+  const now=new Date();
+  const nowT=`${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
+  const out=[];
+  for(let i=0;i<14 && out.length<limit;i++){
+    const ds=addDays(todayStr(), i);
+    for(const it of scheduleFor(ds)){
+      if(i===0 && it.start_time && hhmm(it.start_time)<nowT) continue;
+      out.push({it, ds});
+      if(out.length>=limit) break;
+    }
+  }
+  return out;
+}
+
+function viewSchedule(){
+  const ws=weekStart();
+  const days=Array.from({length:7},(_,i)=>addDays(ws,i));
+  const inThisWeek = days.includes(todayStr());
+  const up=upcoming(3);
+
+  let dayCards="";
+  for(const ds of days){
+    const items=scheduleFor(ds);
+    const isToday=ds===todayStr();
+    const wd=wdOf(ds);
+    dayCards+=`
+    <div class="card" style="${isToday?"border:2px solid var(--green);":""}padding:12px 16px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:${items.length?"4px":"0"}">
+        <div class="eyebrow" style="${isToday?"color:var(--green)":""}">${WD_LONG[wd]} · ${dmy(ds)}${isToday?" · HÔM NAY":""}</div>
+        <div style="flex:1"></div>
+        <button class="iconbtn" style="width:28px;height:28px;font-size:14px" onclick="openScheduleModal(null,'${ds}')">＋</button>
+      </div>
+      ${items.length? items.map(it=>`
+        <button class="row" style="padding:9px 0" onclick="openScheduleModal('${it.id}','${ds}')">
+          <div class="avatar av-g" style="font-size:16px;width:34px;height:34px">${esc(it.icon||"📌")}</div>
+          <div class="rowmain name">${esc(it.title)}
+            <div class="sub">${it.start_time?hhmm(it.start_time)+(it.end_time?" – "+hhmm(it.end_time):""):"cả ngày"}${it.repeat_kind==="weekly"?" · 🔁 hàng tuần":""}${it.note?" · "+esc(it.note):""}</div>
+          </div>
+        </button>`).join("")
+      : `<div class="sub" style="padding:6px 0 2px">—</div>`}
+    </div>`;
+  }
+
+  return `
+    <div class="eyebrow">Lịch trình</div>
+    <div class="monthnav">
+      <button class="mbtn" onclick="changeWeek(-1)">‹</button>
+      <h1 class="h1" style="font-size:19px">${dmy(ws)} – ${dmy(addDays(ws,6))}</h1>
+      <button class="mbtn" onclick="changeWeek(1)">›</button>
+    </div>
+    ${!inThisWeek?`<button class="btn btn-ghost" style="margin-bottom:14px" onclick="thisWeek()">↩ Về tuần này</button>`:""}
+    ${up.length?`<div class="card" style="background:var(--ink);color:#fff">
+      <div class="eyebrow" style="color:rgba(255,255,255,.65);margin-bottom:6px">Sắp tới</div>
+      ${up.map(u=>`<div style="display:flex;gap:9px;align-items:center;padding:5px 0">
+        <span style="font-size:17px">${esc(u.it.icon||"📌")}</span>
+        <span style="font-weight:700;font-size:14px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(u.it.title)}</span>
+        <span style="font-size:12.5px;color:rgba(255,255,255,.75);white-space:nowrap">${u.ds===todayStr()?"Hôm nay":u.ds===addDays(todayStr(),1)?"Mai":WD_SHORT[wdOf(u.ds)]+" "+dmy(u.ds)}${u.it.start_time?" · "+hhmm(u.it.start_time):""}</span>
+      </div>`).join("")}
+    </div>`:""}
+    <button class="btn" style="margin-bottom:14px" onclick="openScheduleModal()">＋ Thêm lịch</button>
+    ${dayCards}
+    ${state.schedule.length?"":`<div class="card"><div class="empty"><span class="big-ic">📅</span>Chưa có lịch nào.<br>Thêm lịch cố định hàng tuần (VD: gym T3-T5 19h) hoặc hẹn một lần.</div></div>`}`;
+}
+
+function openScheduleModal(id, ctxDate){
+  const it = id ? state.schedule.find(x=>x.id===id) : null;
+  let kind = it?.repeat_kind || "weekly";
+  let icon = it?.icon || "📌";
+  let wd = (it && it.weekday!==null && it.weekday!==undefined) ? it.weekday : (ctxDate?wdOf(ctxDate):wdOf(todayStr()));
+  const s=sheetOpen(`
+    <div class="sheethead"><div class="h1">${it?"Sửa lịch":"Thêm lịch"}</div><button class="x" data-close>✕</button></div>
+    <div class="field"><div class="seg" id="sc-seg">
+      <button data-k="weekly" class="${kind==="weekly"?"on":""}">🔁 Hàng tuần</button>
+      <button data-k="once" class="${kind==="once"?"on":""}">📍 Một lần</button>
+    </div></div>
+    <div class="field"><label class="lbl">Việc gì?</label>
+      <input class="in" id="sc-title" placeholder="VD: Đá bóng, Học tiếng Anh" value="${esc(it?.title||"")}"></div>
+    <div class="field"><label class="lbl">Biểu tượng</label>
+      <div class="emorow" id="sc-emo">${SCH_ICONS.map(e=>`<button class="emo ${e===icon?"on":""}" data-e="${e}">${e}</button>`).join("")}</div></div>
+    <div class="field" id="sc-wdwrap" style="${kind==="weekly"?"":"display:none"}">
+      <label class="lbl">Thứ mấy trong tuần</label>
+      <div class="chips" id="sc-wd">${[1,2,3,4,5,6,0].map(d=>`
+        <button class="chip ${d===wd?"on":""}" data-d="${d}">${WD_SHORT[d]}</button>`).join("")}</div></div>
+    <div class="field" id="sc-datewrap" style="${kind==="once"?"":"display:none"}">
+      <label class="lbl">Ngày</label>
+      <input class="in" id="sc-date" type="date" value="${it?.event_date || ctxDate || todayStr()}"></div>
+    <div class="field" style="display:flex;gap:10px">
+      <div style="flex:1"><label class="lbl">Bắt đầu</label>
+        <input class="in" id="sc-start" type="time" value="${hhmm(it?.start_time)}"></div>
+      <div style="flex:1"><label class="lbl">Kết thúc</label>
+        <input class="in" id="sc-end" type="time" value="${hhmm(it?.end_time)}"></div>
+    </div>
+    <div class="field"><label class="lbl">Ghi chú (không bắt buộc)</label>
+      <input class="in" id="sc-note" placeholder="VD: sân Hà Lầm, mang áo xanh" value="${esc(it?.note||"")}"></div>
+    ${it&&it.repeat_kind==="weekly"?`<div class="mybox"><label>
+      <input type="checkbox" id="sc-active" ${it.active!==false?"checked":""}>
+      <span>Đang bật — hiện trong lịch mỗi tuần</span></label></div>`:""}
+    <button class="btn" id="sc-save" style="margin-top:14px">${it?"Lưu thay đổi":"Thêm vào lịch"}</button>
+    ${it&&it.repeat_kind==="weekly"&&ctxDate?`<button class="btn btn-ghost" id="sc-skip" style="margin-top:10px">⏭ Bỏ riêng tuần này (${dmy(ctxDate)})</button>`:""}
+    ${it?`<button class="btn btn-danger" id="sc-del" style="margin-top:10px">Xoá lịch này</button>`:""}
+  `);
+  const el=x=>s.el.querySelector(x);
+  el("[data-close]").onclick=s.close;
+  s.el.querySelectorAll("#sc-seg button").forEach(b=>b.onclick=()=>{
+    kind=b.dataset.k;
+    s.el.querySelectorAll("#sc-seg button").forEach(x=>x.classList.toggle("on",x===b));
+    el("#sc-wdwrap").style.display = kind==="weekly"?"":"none";
+    el("#sc-datewrap").style.display = kind==="once"?"":"none";
+  });
+  s.el.querySelectorAll("#sc-emo .emo").forEach(b=>b.onclick=()=>{
+    icon=b.dataset.e; s.el.querySelectorAll("#sc-emo .emo").forEach(x=>x.classList.toggle("on",x===b));
+  });
+  s.el.querySelectorAll("#sc-wd .chip").forEach(b=>b.onclick=()=>{
+    wd=Number(b.dataset.d); s.el.querySelectorAll("#sc-wd .chip").forEach(x=>x.classList.toggle("on",x===b));
+  });
+  setTimeout(()=>{ if(!it) el("#sc-title").focus(); }, 60);
+
+  el("#sc-save").onclick=async ()=>{
+    const title=el("#sc-title").value.trim();
+    if(!title) return toast("Ghi tên việc đã nhé", true);
+    const btn=el("#sc-save"); btn.disabled=true;
+    try{
+      const pp={ title, icon, note:el("#sc-note").value.trim()||null,
+        repeat_kind:kind,
+        weekday: kind==="weekly"?wd:null,
+        event_date: kind==="once"?(el("#sc-date").value||todayStr()):null,
+        start_time: el("#sc-start").value||null,
+        end_time: el("#sc-end").value||null,
+        active: el("#sc-active") ? el("#sc-active").checked : true };
+      if(it) await run(sb.from("schedule_items").update(pp).eq("id", it.id));
+      else await run(sb.from("schedule_items").insert(pp));
+      await dbLoad(); closeAllSheets(); render(); toast(it?"Đã lưu lịch ✓":"Đã thêm vào lịch ✓");
+    }catch(e){ btn.disabled=false; }
+  };
+  const skip=el("#sc-skip");
+  if(skip) skip.onclick=async ()=>{
+    try{
+      await run(sb.from("schedule_skips").insert({item_id:it.id, skip_date:ctxDate}));
+      await dbLoad(); closeAllSheets(); render(); toast(`Đã bỏ lịch ngày ${dmy(ctxDate)} ✓`);
+    }catch(e){ toast("Tuần này đã bỏ rồi", true); }
+  };
+  const del=el("#sc-del");
+  if(del) del.onclick=async ()=>{
+    if(!(await ask(it.repeat_kind==="weekly"?"Xoá lịch này khỏi tất cả các tuần?":"Xoá lịch này?"))) return;
+    await run(sb.from("schedule_items").delete().eq("id", it.id));
+    await dbLoad(); closeAllSheets(); render(); toast("Đã xoá");
+  };
+}
+
 /* ================= TRANG KHÁC / CÀI ĐẶT ================= */
 function viewSettings(){
   const cfg=getCfg();
@@ -1694,7 +1980,8 @@ function exportBackup(){
     expenses:state.expenses, expense_splits:state.splits, settlements:state.settlements,
     categories:state.categories, personal_expenses:state.personal,
     incomes:state.incomes, budgets:state.budgets, quick_items:state.quick,
-    funds:state.funds, fund_txns:state.fundTxns };
+    funds:state.funds, fund_txns:state.fundTxns,
+    schedule_items:state.schedule, schedule_skips:state.skips };
   const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
   const a=document.createElement("a");
   a.href=URL.createObjectURL(blob);
