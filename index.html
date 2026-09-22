@@ -82,6 +82,8 @@ input,select,textarea{font-family:inherit;font-size:16px;color:var(--ink)}
 select.in{appearance:none;background:#fff url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8"><path d="M1 1l5 5 5-5" stroke="%2371806F" stroke-width="2" fill="none" stroke-linecap="round"/></svg>') no-repeat right 13px center}
 .seg{display:flex;background:var(--paper);border-radius:12px;padding:4px;gap:4px}
 .seg button{flex:1;border:0;background:transparent;border-radius:9px;padding:9px 6px;font-size:13.5px;font-weight:700;color:var(--muted);cursor:pointer}
+.seg.segtop{background:var(--card);box-shadow:var(--shadow);margin-bottom:14px}
+.seg.segtop button{padding:10px 6px;font-size:14px}
 .seg button.on{background:#fff;color:var(--ink);box-shadow:0 1px 4px rgba(24,39,32,.12)}
 .chips{display:flex;flex-wrap:wrap;gap:8px}
 .chip{border:1.5px solid var(--line);background:#fff;border-radius:99px;padding:8px 13px;font-size:13.5px;font-weight:600;cursor:pointer;color:var(--ink)}
@@ -116,8 +118,8 @@ select.in{appearance:none;background:#fff url('data:image/svg+xml,<svg xmlns="ht
 #tabbar{position:fixed;bottom:0;left:0;right:0;z-index:50;display:flex;justify-content:center;pointer-events:none}
 .tabin{pointer-events:auto;display:flex;width:100%;max-width:520px;background:rgba(255,255,255,.93);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
 .tab{flex:1;min-width:0;border:0;background:none;padding:9px 2px 7px;text-align:center;cursor:pointer;color:var(--muted)}
-.tab .ic{font-size:19px;display:block;filter:grayscale(1);opacity:.55}
-.tab .tl{font-size:9px;font-weight:700;margin-top:2px;display:block}
+.tab .ic{font-size:21px;display:block;filter:grayscale(1);opacity:.55}
+.tab .tl{font-size:10.5px;font-weight:700;margin-top:2px;display:block}
 .tab.on{color:var(--green)}
 .tab.on .ic{filter:none;opacity:1}
 
@@ -188,8 +190,8 @@ const state = {
   expenses: [], splits: [], settlements: [],
   categories: [], personal: [],
   incomes: [], budgets: [], quick: [], funds: [], fundTxns: [],
-  schedule: [], skips: [],
-  ui: { tab: "tq", groupId: null, fundId: null, month: curMonth(), weekStart: null }
+  schedule: [], skips: [], tasks: [],
+  ui: { tab: "tien", sec: "no", vsec: "homnay", groupId: null, fundId: null, month: curMonth(), weekStart: null }
 };
 
 /* ================= TIỆN ÍCH ================= */
@@ -386,7 +388,7 @@ async function run(q){
   return data;
 }
 async function dbLoad(){
-  const [m,g,gm,e,s,st,c,p,inc,bud,qk,fu,ftx,sch,skp] = await Promise.all([
+  const [m,g,gm,e,s,st,c,p,inc,bud,qk,fu,ftx,sch,skp,tk] = await Promise.all([
     run(sb.from("members").select("*")),
     run(sb.from("groups").select("*").order("created_at")),
     run(sb.from("group_members").select("*")),
@@ -401,7 +403,8 @@ async function dbLoad(){
     run(sb.from("funds").select("*").order("created_at")),
     run(sb.from("fund_txns").select("*")),
     run(sb.from("schedule_items").select("*")),
-    run(sb.from("schedule_skips").select("*"))
+    run(sb.from("schedule_skips").select("*")),
+    run(sb.from("tasks").select("*").order("created_at"))
   ]);
   const byDate=(a,b)=>(b.expense_date||"").localeCompare(a.expense_date||"") || (b.created_at||"").localeCompare(a.created_at||"");
   state.members=m; state.groups=g; state.groupMembers=gm;
@@ -411,7 +414,7 @@ async function dbLoad(){
   state.incomes=inc.sort((a,b)=>(b.income_date||"").localeCompare(a.income_date||""));
   clearNetCache();
   state.budgets=bud; state.quick=qk; state.funds=fu;
-  state.schedule=sch; state.skips=skp;
+  state.schedule=sch; state.skips=skp; state.tasks=tk;
   state.fundTxns=ftx.sort((a,b)=>(b.txn_date||"").localeCompare(a.txn_date||"") || (b.created_at||"").localeCompare(a.created_at||""));
 }
 async function ensureMe(){
@@ -421,7 +424,7 @@ async function ensureMe(){
 }
 async function afterLogin(){
   app().innerHTML=`<div class="spinwrap"><div class="spin"></div><div>Đang mở sổ…</div></div>`;
-  try{ await dbLoad(); await ensureMe(); }
+  try{ await dbLoad(); await rollTasks(); await dbLoad(); await ensureMe(); }
   catch(e){
     app().innerHTML=`<div class="hero"><div class="logo">📕</div><h1 class="h1">Chưa đọc được dữ liệu</h1>
     <div class="errbox">${esc(e.message||e)}</div>
@@ -433,7 +436,7 @@ async function afterLogin(){
   render();
 }
 async function refresh(silent){
-  try{ await dbLoad(); render(); if(!silent) toast("Đã làm mới"); }catch(e){}
+  try{ await rollTasks(); await dbLoad(); render(); if(!silent) toast("Đã làm mới"); }catch(e){}
 }
 document.addEventListener("visibilitychange", ()=>{
   if(!document.hidden && state.session && sb) refresh(true);
@@ -540,18 +543,43 @@ function hasActivity(mid){
 }
 
 /* ================= KHUNG CHÍNH ================= */
-const TABS=[["tq","Tổng quan","📒"],["nhom","Nhóm","👥"],["canhan","Cá nhân","💳"],["quy","Quỹ","🏦"],["lich","Lịch","📅"],["khac","Khác","⚙️"]];
-function setTab(t){ state.ui.tab=t; render(); window.scrollTo(0,0); }
+const TABS=[["tien","Tiền","📒"],["chitieu","Chi tiêu","💳"],["viec","Việc","✅"],["khac","Khác","⚙️"]];
+const MONEY_SEC=[["no","Nợ"],["nhom","Nhóm"],["quy","Quỹ"]];
+const WORK_SEC=[["homnay","Hôm nay"],["lich","Lịch tuần"],["ls","Lịch sử"]];
+
+function setTab(t){
+  state.ui.tab=t; state.ui.groupId=null; state.ui.fundId=null;
+  render(); window.scrollTo(0,0);
+}
+function setSec(v){ state.ui.sec=v; state.ui.groupId=null; state.ui.fundId=null; render(); window.scrollTo(0,0); }
+function setVSec(v){ state.ui.vsec=v; render(); window.scrollTo(0,0); }
+function segBar(items, cur, fn){
+  return `<div class="seg segtop">${items.map(([id,label])=>`
+    <button class="${cur===id?"on":""}" onclick="${fn}('${id}')">${label}</button>`).join("")}</div>`;
+}
+
 function render(){
   if(!state.session) return;
   clearNetCache();
   const t=state.ui.tab;
   let html="";
-  if(t==="tq") html=viewTQ();
-  else if(t==="nhom") html= state.ui.groupId ? viewGroupDetail() : viewGroups();
-  else if(t==="canhan") html=viewPersonal();
-  else if(t==="quy") html= state.ui.fundId ? viewFundDetail() : viewFunds();
-  else if(t==="lich") html=viewSchedule();
+  if(t==="tien"){
+    if(state.ui.groupId) html=viewGroupDetail();
+    else if(state.ui.fundId) html=viewFundDetail();
+    else{
+      const sec=state.ui.sec||"no";
+      html=`<div class="eyebrow">Sổ Tiền · ${dmyFull(todayStr())}</div><h1 class="h1">Tiền</h1>`
+        + segBar(MONEY_SEC, sec, "setSec")
+        + (sec==="nhom"?viewGroups(): sec==="quy"?viewFunds(): viewTQ());
+    }
+  }
+  else if(t==="chitieu") html=viewPersonal();
+  else if(t==="viec"){
+    const v=state.ui.vsec||"homnay";
+    html=`<div class="eyebrow">Công việc</div><h1 class="h1">Việc &amp; Lịch</h1>`
+      + segBar(WORK_SEC, v, "setVSec")
+      + (v==="lich"?viewSchedule(): v==="ls"?viewTaskHistory(): viewTasks());
+  }
   else html=viewSettings();
   app().innerHTML=html;
   $("#tabbar").innerHTML=`<div class="tabin">${TABS.map(([id,label,ic])=>`
@@ -572,7 +600,7 @@ function viewTQ(){
   if(!others.length){
     list=`<div class="card"><div class="empty"><span class="big-ic">🚴</span>
       Chưa có ai trong sổ.<br>Tạo nhóm đầu tiên để bắt đầu chia tiền nhé.
-      <button class="btn" style="margin-top:16px" onclick="setTab('nhom')">Tạo nhóm ngay</button></div></div>`;
+      <button class="btn" style="margin-top:16px" onclick="setSec('nhom')">Tạo nhóm ngay</button></div></div>`;
   }else if(!rows.length){
     list=`<div class="card"><div class="empty"><span class="big-ic">🍃</span>Chưa có khoản nợ nào. Vào tab Nhóm để thêm khoản chi.</div></div>`;
   }else{
@@ -588,8 +616,6 @@ function viewTQ(){
   }
 
   return `
-    <div class="eyebrow">Sổ Tiền · ${dmyFull(todayStr())}</div>
-    <h1 class="h1">Tổng quan</h1>
     <div class="card" style="background:var(--green);color:#fff">
       <div class="eyebrow" style="color:rgba(255,255,255,.75)">Mọi người đang nợ bạn</div>
       <div class="money big">${NF.format(owedMe)}<span class="d">đ</span></div>
@@ -707,8 +733,6 @@ function viewGroups(){
     </button>`;
   }).join("");
   return `
-    <div class="eyebrow">Chia tiền chung</div>
-    <h1 class="h1">Nhóm</h1>
     ${state.groups.length?`<div class="card">${cards}</div>`:`<div class="card"><div class="empty"><span class="big-ic">🧋</span>Chưa có nhóm nào.<br>VD: "Đạp xe", "Trà sữa văn phòng"…</div></div>`}
     <button class="btn" onclick="openGroupModal()">＋ Tạo nhóm mới</button>`;
 }
@@ -812,7 +836,7 @@ function openGroupModal(gid){
       else{ const rows=await run(sb.from("groups").insert({name, icon}).select()); theId=rows[0].id; }
       await run(sb.from("group_members").delete().eq("group_id", theId));
       await run(sb.from("group_members").insert([...selected].map(mid=>({group_id:theId, member_id:mid}))));
-      await dbLoad(); closeAllSheets(); state.ui.groupId=theId; state.ui.tab="nhom"; render();
+      await dbLoad(); closeAllSheets(); state.ui.groupId=theId; state.ui.tab="tien"; state.ui.sec="nhom"; render();
       toast(g?"Đã lưu nhóm ✓":"Đã tạo nhóm ✓");
     }catch(e){ btn.disabled=false; }
   };
@@ -1474,8 +1498,6 @@ function viewFunds(){
     </button>`;
   }).join("");
   return `
-    <div class="eyebrow">Tiền bạn đang giữ hộ</div>
-    <h1 class="h1">Quỹ</h1>
     <div class="card" style="background:var(--green);color:#fff">
       <div class="eyebrow" style="color:rgba(255,255,255,.75)">Tổng đang giữ</div>
       <div class="money big">${NF.format(total)}<span class="d">đ</span></div>
@@ -1566,7 +1588,7 @@ function openFundModal(fid){
           fund_id:rows[0].id, amount:init, kind:"in", note:"Số tiền ban đầu", txn_date:todayStr() }));
         state.ui.fundId=rows[0].id;
       }
-      await dbLoad(); closeAllSheets(); state.ui.tab="quy"; render();
+      await dbLoad(); closeAllSheets(); state.ui.tab="tien"; state.ui.sec="quy"; render();
       toast(f?"Đã lưu ✓":"Đã tạo quỹ ✓");
     }catch(e){ btn.disabled=false; }
   };
@@ -1727,7 +1749,6 @@ function viewSchedule(){
   }
 
   return `
-    <div class="eyebrow">Lịch trình</div>
     <div class="monthnav">
       <button class="mbtn" onclick="changeWeek(-1)">‹</button>
       <h1 class="h1" style="font-size:19px">${dmy(ws)} – ${dmy(addDays(ws,6))}</h1>
@@ -1830,6 +1851,213 @@ function openScheduleModal(id, ctxDate){
     await run(sb.from("schedule_items").delete().eq("id", it.id));
     await dbLoad(); closeAllSheets(); render(); toast("Đã xoá");
   };
+}
+
+/* ================= VIỆC CẦN LÀM ================= */
+const ST_META={
+  todo:   {ic:"☐", label:"Cần làm",  bg:"var(--paper)",      fg:"var(--muted)"},
+  doing:  {ic:"◐", label:"Đang làm", bg:"#F4EDDC",           fg:"var(--amber)"},
+  done:   {ic:"✓", label:"Xong",     bg:"var(--green-soft)", fg:"var(--green)"},
+  cancel: {ic:"✕", label:"Đã huỷ",   bg:"var(--red-soft)",   fg:"var(--red)"}
+};
+const ST_ORDER=["todo","doing","done","cancel"];
+
+/* Việc chưa xong của hôm trước tự dời sang hôm nay */
+async function rollTasks(){
+  const t=todayStr();
+  try{
+    const { error }=await sb.from("tasks").update({due_date:t})
+      .lt("due_date", t).in("status", ["todo","doing"]);
+    if(error) throw error;
+  }catch(e){}
+}
+function lateDays(tk){
+  if(!tk.origin_date || tk.origin_date>=tk.due_date) return 0;
+  return Math.round((new Date(tk.due_date+"T12:00:00") - new Date(tk.origin_date+"T12:00:00"))/86400000);
+}
+function doneDate(tk){ return tk.done_at ? tk.done_at.slice(0,10) : tk.due_date; }
+
+async function cycleStatus(id){
+  const tk=state.tasks.find(x=>x.id===id); if(!tk) return;
+  const next = tk.status==="todo" ? "doing" : tk.status==="doing" ? "done" : "todo";
+  const pp={ status:next, done_at: next==="done" ? new Date().toISOString() : null };
+  if(next==="done") pp.due_date=todayStr();
+  tk.status=next; tk.done_at=pp.done_at;   /* cập nhật ngay cho mượt */
+  render();
+  try{ await run(sb.from("tasks").update(pp).eq("id", id)); await dbLoad(); render(); }
+  catch(e){ await dbLoad(); render(); }
+}
+async function quickAddTask(){
+  const inp=$("#tk-new"); if(!inp) return;
+  const title=inp.value.trim(); if(!title) return;
+  inp.value="";
+  try{
+    await run(sb.from("tasks").insert({title, due_date:todayStr(), origin_date:todayStr()}));
+    await dbLoad(); render();
+    setTimeout(()=>$("#tk-new")?.focus(), 50);
+  }catch(e){}
+}
+
+function taskRow(tk, showLate){
+  const m=ST_META[tk.status]||ST_META.todo;
+  const late=showLate?lateDays(tk):0;
+  const strike = (tk.status==="done"||tk.status==="cancel") ? "text-decoration:line-through;opacity:.6" : "";
+  return `<div class="sprow" style="gap:11px">
+    <button class="iconbtn" style="background:${m.bg};color:${m.fg};font-size:16px" onclick="cycleStatus('${tk.id}')">${m.ic}</button>
+    <button class="rowmain name" style="flex:1;min-width:0;text-align:left;border:0;background:none;cursor:pointer;padding:0;font-size:15px"
+      onclick="openTaskModal('${tk.id}')">
+      <span style="${strike}">${esc(tk.title)}</span>
+      ${(late>0||tk.note)?`<div class="sub">${late>0?`<span style="color:var(--red)">⏱ trễ ${late} ngày</span>${tk.note?" · ":""}`:""}${tk.note?esc(tk.note):""}</div>`:""}
+    </button>
+  </div>`;
+}
+
+function viewTasks(){
+  const t=todayStr();
+  const doing=state.tasks.filter(x=>x.status==="doing" && x.due_date<=t);
+  const todo =state.tasks.filter(x=>x.status==="todo"  && x.due_date<=t);
+  const doneToday=state.tasks.filter(x=>(x.status==="done"||x.status==="cancel") && doneDate(x)===t);
+  const later=state.tasks.filter(x=>(x.status==="todo"||x.status==="doing") && x.due_date>t)
+    .sort((a,b)=>a.due_date.localeCompare(b.due_date));
+  const left=doing.length+todo.length;
+
+  const block=(title,arr,late)=>arr.length?`<div class="card">
+    <div class="eyebrow" style="margin-bottom:2px">${title}</div>${arr.map(x=>taskRow(x,late)).join("")}</div>`:"";
+
+  return `
+    <div class="card" style="background:var(--ink);color:#fff">
+      <div class="eyebrow" style="color:rgba(255,255,255,.65)">${WD_LONG[wdOf(t)]} · ${dmy(t)}</div>
+      <div class="money big">${left}<span class="d" style="font-size:.5em"> việc cần làm</span></div>
+      ${doneToday.length?`<div style="margin-top:6px;font-size:13.5px;font-weight:600;color:#7FD3A8">Đã xong hôm nay: ${doneToday.filter(x=>x.status==="done").length}</div>`:""}
+    </div>
+    <div class="card" style="padding:12px 14px">
+      <div style="display:flex;gap:8px">
+        <input class="in" id="tk-new" placeholder="Thêm việc cho hôm nay…" style="flex:1"
+          onkeydown="if(event.key==='Enter')quickAddTask()">
+        <button class="btn btn-sm" style="width:auto;padding:0 16px" onclick="quickAddTask()">＋</button>
+      </div>
+    </div>
+    ${block("Đang làm", doing, true)}
+    ${block("Cần làm", todo, true)}
+    ${block("Đã xong hôm nay", doneToday, false)}
+    ${later.length?`<div class="card"><div class="eyebrow" style="margin-bottom:2px">Sắp tới</div>
+      ${later.slice(0,8).map(x=>`<div class="sprow" style="gap:11px">
+        <button class="iconbtn" style="background:var(--paper);color:var(--muted);font-size:16px" onclick="cycleStatus('${x.id}')">☐</button>
+        <button class="rowmain name" style="flex:1;min-width:0;text-align:left;border:0;background:none;cursor:pointer;padding:0;font-size:15px" onclick="openTaskModal('${x.id}')">
+          ${esc(x.title)}<div class="sub">${dmy(x.due_date)}</div></button>
+      </div>`).join("")}</div>`:""}
+    ${(left||doneToday.length||later.length)?"":`<div class="card"><div class="empty"><span class="big-ic">🗒️</span>Hôm nay chưa có việc nào.<br>Gõ vào ô trên để thêm nhanh.</div></div>`}
+    <button class="btn btn-line" onclick="openTaskModal()">＋ Thêm việc chi tiết (chọn ngày, ghi chú)</button>`;
+}
+
+function openTaskModal(id){
+  const tk = id ? state.tasks.find(x=>x.id===id) : null;
+  let st = tk?.status || "todo";
+  const s=sheetOpen(`
+    <div class="sheethead"><div class="h1">${tk?"Sửa việc":"Việc mới"}</div><button class="x" data-close>✕</button></div>
+    <div class="field"><label class="lbl">Việc gì?</label>
+      <input class="in" id="tk-title" placeholder="VD: Gửi báo giá cho khách A" value="${esc(tk?.title||"")}"></div>
+    <div class="field"><label class="lbl">Trạng thái</label>
+      <div class="chips" id="tk-st">${ST_ORDER.map(k=>`
+        <button class="chip ${k===st?"on":""}" data-s="${k}">${ST_META[k].ic} ${ST_META[k].label}</button>`).join("")}</div></div>
+    <div class="field"><label class="lbl">Ngày</label>
+      <input class="in" id="tk-date" type="date" value="${tk?tk.due_date:todayStr()}"></div>
+    <div class="field"><label class="lbl">Ghi chú (không bắt buộc)</label>
+      <input class="in" id="tk-note" placeholder="VD: cần sếp duyệt trước" value="${esc(tk?.note||"")}"></div>
+    ${tk&&lateDays(tk)>0?`<div class="note" style="margin:0 0 12px">⏱ Việc này tạo ngày ${dmyFull(tk.origin_date)}, đã dời ${lateDays(tk)} ngày.</div>`:""}
+    <button class="btn" id="tk-save">${tk?"Lưu thay đổi":"Thêm việc"}</button>
+    ${tk?`<button class="btn btn-danger" id="tk-del" style="margin-top:10px">Xoá việc này</button>`:""}`);
+  const el=x=>s.el.querySelector(x);
+  el("[data-close]").onclick=s.close;
+  s.el.querySelectorAll("#tk-st .chip").forEach(b=>b.onclick=()=>{
+    st=b.dataset.s; s.el.querySelectorAll("#tk-st .chip").forEach(x=>x.classList.toggle("on",x===b));
+  });
+  setTimeout(()=>{ if(!tk) el("#tk-title").focus(); }, 60);
+  el("#tk-save").onclick=async ()=>{
+    const title=el("#tk-title").value.trim();
+    if(!title) return toast("Ghi tên việc đã nhé", true);
+    const btn=el("#tk-save"); btn.disabled=true;
+    try{
+      const date=el("#tk-date").value||todayStr();
+      const pp={ title, status:st, note:el("#tk-note").value.trim()||null, due_date:date,
+        done_at: (st==="done"||st==="cancel") ? (tk?.done_at || new Date().toISOString()) : null };
+      if(tk) await run(sb.from("tasks").update(pp).eq("id", tk.id));
+      else await run(sb.from("tasks").insert({...pp, origin_date:date}));
+      await dbLoad(); closeAllSheets(); render(); toast(tk?"Đã lưu ✓":"Đã thêm việc ✓");
+    }catch(e){ btn.disabled=false; }
+  };
+  const del=el("#tk-del");
+  if(del) del.onclick=async ()=>{
+    if(!(await ask("Xoá việc này khỏi sổ?"))) return;
+    await run(sb.from("tasks").delete().eq("id", tk.id));
+    await dbLoad(); closeAllSheets(); render(); toast("Đã xoá");
+  };
+}
+
+/* ---------- Lịch sử tuần (để khai task công ty) ---------- */
+function weekTaskData(){
+  const ws=weekStart();
+  const days=Array.from({length:7},(_,i)=>addDays(ws,i));
+  return days.map(ds=>({
+    ds,
+    items: state.tasks.filter(x=>(x.status==="done"||x.status==="cancel") && doneDate(x)===ds)
+  }));
+}
+function viewTaskHistory(){
+  const ws=weekStart();
+  const data=weekTaskData();
+  const totalDone=data.reduce((a,d)=>a+d.items.filter(x=>x.status==="done").length,0);
+  const totalCancel=data.reduce((a,d)=>a+d.items.filter(x=>x.status==="cancel").length,0);
+  const inThisWeek=data.some(d=>d.ds===todayStr());
+
+  let body="";
+  for(const d of data){
+    if(!d.items.length) continue;
+    body+=`<div class="dayhead">${WD_LONG[wdOf(d.ds)]} · ${dmy(d.ds)}</div>
+      <div class="card" style="padding:6px 16px">${d.items.map(x=>{
+        const m=ST_META[x.status];
+        return `<div class="sprow" style="gap:10px">
+          <span style="color:${m.fg};font-weight:800">${m.ic}</span>
+          <button class="rowmain name" style="flex:1;min-width:0;text-align:left;border:0;background:none;padding:0;font-size:14.5px;cursor:pointer"
+            onclick="openTaskModal('${x.id}')">${esc(x.title)}
+            ${x.note?`<div class="sub">${esc(x.note)}</div>`:""}</button>
+        </div>`;}).join("")}</div>`;
+  }
+
+  return `
+    <div class="monthnav">
+      <button class="mbtn" onclick="changeWeek(-1)">‹</button>
+      <h1 class="h1" style="font-size:19px">${dmy(ws)} – ${dmy(addDays(ws,6))}</h1>
+      <button class="mbtn" onclick="changeWeek(1)">›</button>
+    </div>
+    ${!inThisWeek?`<button class="btn btn-ghost" style="margin-bottom:14px" onclick="thisWeek()">↩ Về tuần này</button>`:""}
+    <div class="card" style="background:var(--ink);color:#fff">
+      <div class="eyebrow" style="color:rgba(255,255,255,.65)">Đã hoàn thành trong tuần</div>
+      <div class="money big">${totalDone}<span class="d" style="font-size:.5em"> việc</span></div>
+      ${totalCancel?`<div style="margin-top:6px;font-size:13px;color:#FFB4A0">${totalCancel} việc đã huỷ</div>`:""}
+    </div>
+    ${totalDone+totalCancel?`<button class="btn" onclick="copyWeekTasks()">📋 Sao chép cả tuần để khai task</button>`:""}
+    ${body||`<div class="card"><div class="empty"><span class="big-ic">📭</span>Tuần này chưa có việc nào hoàn thành.</div></div>`}`;
+}
+async function copyWeekTasks(){
+  const data=weekTaskData();
+  const lines=[];
+  for(const d of data){
+    const done=d.items.filter(x=>x.status==="done");
+    if(!done.length) continue;
+    lines.push(`${WD_LONG[wdOf(d.ds)]} ${dmy(d.ds)}`);
+    for(const x of done) lines.push(`• ${x.title}${x.note?` (${x.note})`:""}`);
+    lines.push("");
+  }
+  const text=lines.join("\n").trim();
+  if(!text) return toast("Tuần này chưa có việc nào xong", true);
+  try{ await navigator.clipboard.writeText(text); toast("Đã sao chép, dán vào form khai task ✓"); }
+  catch(e){
+    const ta=document.createElement("textarea");
+    ta.value=text; document.body.appendChild(ta); ta.select();
+    document.execCommand("copy"); ta.remove();
+    toast("Đã sao chép ✓");
+  }
 }
 
 /* ================= TRANG KHÁC / CÀI ĐẶT ================= */
@@ -1981,7 +2209,7 @@ function exportBackup(){
     categories:state.categories, personal_expenses:state.personal,
     incomes:state.incomes, budgets:state.budgets, quick_items:state.quick,
     funds:state.funds, fund_txns:state.fundTxns,
-    schedule_items:state.schedule, schedule_skips:state.skips };
+    schedule_items:state.schedule, schedule_skips:state.skips, tasks:state.tasks };
   const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
   const a=document.createElement("a");
   a.href=URL.createObjectURL(blob);
