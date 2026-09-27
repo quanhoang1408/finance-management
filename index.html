@@ -155,6 +155,9 @@ textarea.in{min-height:92px;resize:vertical;line-height:1.5}
 .spinwrap{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:70vh;gap:14px;color:var(--muted)}
 .spin{width:34px;height:34px;border:3.5px solid var(--line);border-top-color:var(--green);border-radius:50%;animation:rot .8s linear infinite}
 @keyframes rot{to{transform:rotate(360deg)}}
+.spin-sm{width:16px;height:16px;border:2.5px solid var(--line);border-top-color:var(--green);border-radius:50%;animation:rot .8s linear infinite;display:inline-block;vertical-align:-3px}
+.aistat{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;color:var(--muted)}
+.aibusy .in,.aibusy .chips{opacity:.45;transition:opacity .15s}
 .hero{display:flex;flex-direction:column;justify-content:center;min-height:78vh;max-width:400px;margin:0 auto}
 .hero .logo{font-size:52px;margin-bottom:6px}
 .note{font-size:12.5px;color:var(--muted);background:var(--card);border-radius:12px;padding:10px 12px;margin-top:12px;line-height:1.5}
@@ -1336,7 +1339,9 @@ function openPersonalModal(pid){
         <button class="btn btn-ghost" id="p-aigo" style="flex-shrink:0;width:auto;padding:0 16px" ${aiKey()?"":"disabled"}>✨</button>
       </div>
       ${aiKey()?"":`<div class="sub" style="margin-top:6px">Thêm khoá Gemini ở tab Khác để dùng.</div>`}
+      <div class="aistat" id="p-aistat"></div>
     </div>`}
+    <div id="p-form">
     <div class="field" style="display:flex;gap:10px">
       <div style="flex:1.3"><label class="lbl">Số tiền${partner?" (cả hai phần)":""}</label>
         <input class="in" id="p-amt" inputmode="numeric" placeholder="0" value="${totalInit?NF.format(totalInit):""}" style="font-weight:800;font-size:19px"></div>
@@ -1364,6 +1369,7 @@ function openPersonalModal(pid){
         <div class="sumline" style="border-top-width:1px"><span id="p-sp1">—</span><span id="p-sp2">—</span></div>
       </div>
     </div>`}
+    </div>
     <button class="btn" id="p-save" style="margin-top:14px">${p?"Lưu thay đổi":"Ghi vào sổ"}</button>
     ${p?`<button class="btn btn-danger" id="p-del" style="margin-top:10px">Xoá khoản này${partner?" (cả 2 phần)":""}</button>`:""}
   `);
@@ -1409,10 +1415,22 @@ function openPersonalModal(pid){
   /* ✨ đọc câu -> điền thẳng vào form, người dùng vẫn xem lại trước khi Lưu */
   const aiInp=el("#p-ai"), aiBtn=el("#p-aigo");
   if(aiInp && aiBtn){
+    const aiStat=el("#p-aistat"), saveBtn=el("#p-save"), formBox=el("#p-form");
+    let tick=null;
     const runAi=async ()=>{
       const line=aiInp.value.trim();
       if(!line) return;
-      aiBtn.disabled=true; aiInp.disabled=true; aiBtn.textContent="…";
+      /* khoá form lại: đang đọc mà bấm Lưu thì lưu phải dữ liệu nửa vời */
+      aiBtn.disabled=true; aiInp.disabled=true; saveBtn.disabled=true;
+      aiBtn.innerHTML=`<span class="spin-sm"></span>`;
+      formBox.classList.add("aibusy");
+      const t0=Date.now();
+      aiStat.innerHTML=`<span class="spin-sm"></span><span id="p-aimsg">Đang đọc…</span>`;
+      tick=setInterval(()=>{
+        const s=Math.round((Date.now()-t0)/1000);
+        const m=el("#p-aimsg");
+        if(m) m.textContent = s<3 ? "Đang đọc…" : (s<8 ? `Đang đọc… ${s}s` : `Gemini hơi chậm… ${s}s`);
+      }, 500);
       try{
         const r=await aiParse(line);
         if(r.amount){
@@ -1430,14 +1448,19 @@ function openPersonalModal(pid){
       }catch(e){
         toast(e.message==="NO_KEY" ? "Chưa có khoá Gemini — thêm ở tab Khác" : (e.message||"Không đọc được"), true);
       }finally{
-        aiBtn.disabled=false; aiInp.disabled=false; aiBtn.textContent="✨";
+        clearInterval(tick);
+        aiBtn.disabled=false; aiInp.disabled=false; saveBtn.disabled=false;
+        aiBtn.textContent="✨";
+        formBox.classList.remove("aibusy");
+        aiStat.innerHTML="";
       }
     };
     aiBtn.onclick=runAi;
     aiInp.onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); runAi(); } };
   }
 
-  setTimeout(()=>{ if(!p) (aiInp||amtInp).focus(); }, 60);
+  /* focus vào ô Số tiền như trước: nhập tay vẫn là đường nhanh nhất, ✨ chỉ dùng khi cần */
+  setTimeout(()=>{ if(!p) amtInp.focus(); }, 60);
 
   el("#p-save").onclick=async ()=>{
     const total=getMoney(amtInp);
