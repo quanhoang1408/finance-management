@@ -6,8 +6,8 @@
 <meta name="theme-color" content="#F3F1E9">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="Sổ Tiền">
-<title>Sổ Tiền — Chia tiền nhóm & chi tiêu cá nhân</title>
+<meta name="apple-mobile-web-app-title" content="All In One">
+<title>All In One — tiền, việc, lịch</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2288%22>💵</text></svg>">
 <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2222%22 fill=%22%230E6B47%22/><text x=%2250%22 y=%2268%22 font-size=%2252%22 text-anchor=%22middle%22>💵</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -182,6 +182,8 @@ const SUPABASE_ANON_KEY = "";
 
 const CFG_KEY = "sotien_cfg_v1";
 const LASTCAT_KEY = "sotien_lastcat";
+const AI_KEY = "aio_ai_key_v1";
+const AI_MODEL = "gemini-3.8-flash";
 let sb = null;
 
 const state = {
@@ -203,6 +205,101 @@ function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","
 function fmt(n){ return `<span class="money">${NF.format(Math.round(n||0))}<span class="d">đ</span></span>`; }
 function fmtPlain(n){ return NF.format(Math.round(n||0)) + " đ"; }
 function parseMoney(str){ return Number(String(str||"").replace(/[^\d]/g, "")) || 0; }
+
+/* ===== Ghi bằng câu nói: câu tiếng Việt -> {amount, category_id, expense_date, description} ===== */
+function aiKey(){ return localStorage.getItem(AI_KEY) || ""; }
+
+async function aiParse(text){
+  const key = aiKey();
+  if(!key) throw new Error("NO_KEY");
+  const line = String(text||"").trim();
+  if(!line) throw new Error("Chưa nhập gì để đọc.");
+
+  /* enum id thật trong DB -> model không thể bịa ra category_id */
+  const cats = state.categories.map(c=>({ id:c.id, name:c.name }));
+  const today = todayStr();
+
+  const prompt =
+`Bạn đọc một câu ghi chi tiêu tiếng Việt và tách thành dữ liệu.
+
+Hôm nay là ${today} (định dạng YYYY-MM-DD).
+
+Danh mục có sẵn (chỉ được chọn id trong danh sách này):
+${cats.map(c=>`- ${c.id} = ${c.name}`).join("\n") || "(chưa có danh mục nào)"}
+
+Quy tắc:
+- amount là số nguyên tiền Việt, không dấu phân cách. Viết tắt: "350k"=350000, "35k"=35000, "2tr"=2000000, "2 triệu"=2000000, "1 triệu rưỡi"=1500000, "2tr5"=2500000, "500 nghìn"=500000.
+- expense_date: suy ra từ câu ("hôm qua", "thứ 3 tuần trước", "mùng 2"). Không nhắc tới ngày thì dùng ${today}.
+- category_id: chọn id hợp nghĩa nhất. Không chắc thì trả về chuỗi rỗng "".
+- description: phần mô tả ngắn gọn, đã bỏ số tiền và bỏ từ chỉ ngày.
+
+Câu cần đọc: ${line}`;
+
+  const body = {
+    model: AI_MODEL,
+    input: prompt,
+    response_format: {
+      type: "text",
+      mime_type: "application/json",
+      schema: {
+        type: "object",
+        properties: {
+          amount:       { type:"integer", description:"Số tiền VND" },
+          category_id:  { type:"string", enum: [...cats.map(c=>c.id), ""] },
+          expense_date: { type:"string", description:"YYYY-MM-DD" },
+          description:  { type:"string" }
+        },
+        required: ["amount","category_id","expense_date","description"]
+      }
+    }
+  };
+
+  let res;
+  try{
+    res = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+      method:"POST",
+      headers:{ "x-goog-api-key":key, "Content-Type":"application/json" },
+      body: JSON.stringify(body)
+    });
+  }catch(e){ throw new Error("Không gọi được Gemini — kiểm tra mạng."); }
+
+  if(!res.ok){
+    let detail="";
+    /* Gemini trả lỗi khi thì {error:…}, khi thì [{error:…}] — nhận cả hai */
+    try{
+      const j = await res.json();
+      detail = (Array.isArray(j) ? j[0]?.error?.message : j?.error?.message) || "";
+    }catch(e){}
+    if(res.status===400 && /API key/i.test(detail)) throw new Error("Khoá Gemini không hợp lệ.");
+    if(res.status===429) throw new Error("Hết lượt Gemini hôm nay, thử lại sau.");
+    throw new Error(`Gemini lỗi ${res.status}${detail?": "+detail:""}`);
+  }
+
+  const raw = await res.json();
+  const json = Array.isArray(raw) ? raw[0] : raw;
+  /* có thể có nhiều step (vd model nghĩ trước) — lấy đoạn text cuối cùng */
+  const txt = (json?.steps||[])
+    .filter(s=>s.type==="model_output")
+    .flatMap(s=>s.content||[])
+    .filter(c=>c.type==="text" && c.text)
+    .map(c=>c.text).pop();
+  if(!txt) throw new Error("Gemini không trả về nội dung.");
+
+  let out;
+  try{ out = JSON.parse(txt); }
+  catch(e){ throw new Error("Gemini trả về dữ liệu không đọc được."); }
+
+  /* không tin tưởng tuyệt đối vào model — vẫn lọc lại */
+  const amount = Math.max(0, Math.round(Number(out.amount) || 0));
+  const catOk  = state.categories.some(c=>c.id===out.category_id);
+  const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(out.expense_date||"");
+  return {
+    amount,
+    category_id: catOk ? out.category_id : null,
+    expense_date: dateOk ? out.expense_date : today,
+    description: String(out.description||"").trim()
+  };
+}
 function todayStr(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 function curMonth(){ return todayStr().slice(0,7); }
 function monthLabel(m){ const [y,mm]=m.split("-"); return `Tháng ${Number(mm)}/${y}`; }
@@ -354,7 +451,7 @@ function renderLogin(err){
   app().innerHTML=`
   <div class="hero">
     <div class="logo">💵</div>
-    <div class="eyebrow">Sổ Tiền</div>
+    <div class="eyebrow">All In One</div>
     <h1 class="h1">Đăng nhập</h1>
     ${err?`<div class="errbox">${esc(err)}</div>`:""}
     <div class="field"><label class="lbl">Email</label>
@@ -568,7 +665,7 @@ function render(){
     else if(state.ui.fundId) html=viewFundDetail();
     else{
       const sec=state.ui.sec||"no";
-      html=`<div class="eyebrow">Sổ Tiền · ${dmyFull(todayStr())}</div><h1 class="h1">Tiền</h1>`
+      html=`<div class="eyebrow">All In One · ${dmyFull(todayStr())}</div><h1 class="h1">Tiền</h1>`
         + segBar(MONEY_SEC, sec, "setSec")
         + (sec==="nhom"?viewGroups(): sec==="quy"?viewFunds(): viewTQ());
     }
@@ -1218,6 +1315,14 @@ function openPersonalModal(pid){
   const s=sheetOpen(`
     <div class="sheethead"><div class="h1">${p?"Sửa chi tiêu":"Chi tiêu mới"}</div><button class="x" data-close>✕</button></div>
     ${linked?`<div class="note" style="margin:0 0 12px">🔗 Khoản này được cộng từ một khoản chi nhóm. Sửa khoản chi trong nhóm sẽ cập nhật lại số tiền ở đây.</div>`:""}
+    ${p?"":`<div class="field">
+      <label class="lbl">✨ Tả nhanh</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input class="in" id="p-ai" placeholder="VD: 350k ăn trưa" style="flex:1" ${aiKey()?"":"disabled"}>
+        <button class="btn btn-ghost" id="p-aigo" style="flex-shrink:0;width:auto;padding:0 16px" ${aiKey()?"":"disabled"}>✨</button>
+      </div>
+      ${aiKey()?"":`<div class="sub" style="margin-top:6px">Thêm khoá Gemini ở tab Khác để dùng.</div>`}
+    </div>`}
     <div class="field" style="display:flex;gap:10px">
       <div style="flex:1.3"><label class="lbl">Số tiền${partner?" (cả hai phần)":""}</label>
         <input class="in" id="p-amt" inputmode="numeric" placeholder="0" value="${totalInit?NF.format(totalInit):""}" style="font-weight:800;font-size:19px"></div>
@@ -1286,7 +1391,39 @@ function openPersonalModal(pid){
     recompute();
   });
   recompute();
-  setTimeout(()=>{ if(!p) amtInp.focus(); }, 60);
+
+  /* ✨ đọc câu -> điền thẳng vào form, người dùng vẫn xem lại trước khi Lưu */
+  const aiInp=el("#p-ai"), aiBtn=el("#p-aigo");
+  if(aiInp && aiBtn){
+    const runAi=async ()=>{
+      const line=aiInp.value.trim();
+      if(!line) return;
+      aiBtn.disabled=true; aiInp.disabled=true; aiBtn.textContent="…";
+      try{
+        const r=await aiParse(line);
+        if(r.amount){
+          amtInp.value=NF.format(r.amount);
+          amtInp.dataset.raw=r.amount;        /* getMoney() đọc raw trước — thiếu dòng này là sai số */
+        }
+        el("#p-date").value=r.expense_date;
+        if(r.description) el("#p-desc").value=r.description;
+        if(r.category_id){
+          catId=r.category_id;
+          s.el.querySelectorAll("#p-cats .chip").forEach(x=>x.classList.toggle("on", x.dataset.c===catId));
+        }
+        pTouched=false; recompute();
+        toast("Đã đọc xong ✓ — xem lại rồi Lưu");
+      }catch(e){
+        toast(e.message==="NO_KEY" ? "Chưa có khoá Gemini — thêm ở tab Khác" : (e.message||"Không đọc được"), true);
+      }finally{
+        aiBtn.disabled=false; aiInp.disabled=false; aiBtn.textContent="✨";
+      }
+    };
+    aiBtn.onclick=runAi;
+    aiInp.onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); runAi(); } };
+  }
+
+  setTimeout(()=>{ if(!p) (aiInp||amtInp).focus(); }, 60);
 
   el("#p-save").onclick=async ()=>{
     const total=getMoney(amtInp);
@@ -2110,7 +2247,32 @@ function viewSettings(){
       <button class="btn btn-ghost" style="margin-top:10px" onclick="refresh()">⟳ Làm mới dữ liệu</button>
       ${cfg&&!cfg.fromCode?`<button class="btn btn-line" style="margin-top:10px" onclick="resetCfg()">Đổi kết nối Supabase</button>`:""}
     </div>
-    <div class="sub" style="text-align:center;padding:6px 0 20px">Sổ Tiền 📒 — dữ liệu nằm trong Supabase của riêng bạn</div>`;
+    <div class="card"><div class="eyebrow" style="margin-bottom:4px">Ghi bằng câu nói (AI)</div>
+      ${aiKey()
+        ? `<div class="sub" style="padding:6px 0 10px">Đã có khoá Gemini ✓ — ở ô "Chi tiêu mới" bạn gõ được kiểu <b>350k ăn trưa</b> rồi bấm ✨.</div>
+           <button class="btn btn-ghost" onclick="setAiKey()">Đổi khoá Gemini</button>
+           <button class="btn btn-line" style="margin-top:10px" onclick="clearAiKey()">Xoá khoá</button>`
+        : `<div class="sub" style="padding:6px 0 10px">Chưa có khoá. Thêm khoá Gemini để gõ <b>350k ăn trưa</b> và app tự điền số tiền, danh mục, ngày. Lấy khoá miễn phí ở aistudio.google.com/apikey.</div>
+           <button class="btn btn-ghost" onclick="setAiKey()">＋ Thêm khoá Gemini</button>`}
+    </div>
+
+    <div class="sub" style="text-align:center;padding:6px 0 20px">All In One 📒 — dữ liệu nằm trong Supabase của riêng bạn</div>`;
+}
+
+function setAiKey(){
+  promptSheet("Khoá Gemini", [{key:"key", label:"API key", value:aiKey()||"", placeholder:"AIza…"}], "Lưu khoá").then(r=>{
+    if(!r) return;
+    const k=(r.key||"").trim();
+    if(!k){ toast("Chưa nhập khoá", true); return; }
+    localStorage.setItem(AI_KEY, k);
+    render(); toast("Đã lưu khoá ✓");
+  });
+}
+
+async function clearAiKey(){
+  if(!await ask("Xoá khoá Gemini? Ô ✨ sẽ ngừng hoạt động.")) return;
+  localStorage.removeItem(AI_KEY);
+  render(); toast("Đã xoá khoá ✓");
 }
 
 async function editMember(mid){
@@ -2203,7 +2365,7 @@ async function delCategory(cid){
   await dbLoad(); render(); toast("Đã xoá");
 }
 function exportBackup(){
-  const data={ app:"So Tien", exported_at:new Date().toISOString(),
+  const data={ app:"All In One", exported_at:new Date().toISOString(),
     members:state.members, groups:state.groups, group_members:state.groupMembers,
     expenses:state.expenses, expense_splits:state.splits, settlements:state.settlements,
     categories:state.categories, personal_expenses:state.personal,
@@ -2213,7 +2375,7 @@ function exportBackup(){
   const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
   const a=document.createElement("a");
   a.href=URL.createObjectURL(blob);
-  a.download=`sotien-backup-${todayStr()}.json`;
+  a.download=`allinone-backup-${todayStr()}.json`;
   a.click(); URL.revokeObjectURL(a.href);
   toast("Đã tải bản sao lưu ✓");
 }
