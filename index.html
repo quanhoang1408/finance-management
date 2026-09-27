@@ -254,24 +254,38 @@ Câu cần đọc: ${line}`;
     }
   };
 
-  let res;
-  try{
-    res = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
-      method:"POST",
-      headers:{ "x-goog-api-key":key, "Content-Type":"application/json" },
-      body: JSON.stringify(body)
-    });
-  }catch(e){ throw new Error("Không gọi được Gemini — kiểm tra mạng."); }
+  /* model mới hay quá tải (503) -> tự thử lại vài lần, người dùng không cần biết */
+  const RETRY_ON = [429, 500, 502, 503, 504];
+  let res, detail="";
+  for(let attempt=0; attempt<3; attempt++){
+    try{
+      res = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+        method:"POST",
+        headers:{ "x-goog-api-key":key, "Content-Type":"application/json" },
+        body: JSON.stringify(body)
+      });
+    }catch(e){ throw new Error("Không gọi được Gemini — kiểm tra mạng."); }
 
-  if(!res.ok){
-    let detail="";
+    if(res.ok) break;
+
+    detail="";
     /* Gemini trả lỗi khi thì {error:…}, khi thì [{error:…}] — nhận cả hai */
     try{
       const j = await res.json();
       detail = (Array.isArray(j) ? j[0]?.error?.message : j?.error?.message) || "";
     }catch(e){}
+
+    /* hết quota thì thử lại cũng vô ích, dừng ngay */
+    const outOfQuota = res.status===429 && /quota|exceed/i.test(detail);
+    if(!RETRY_ON.includes(res.status) || outOfQuota || attempt===2) break;
+    await new Promise(r=>setTimeout(r, 700*(attempt+1)));
+  }
+
+  if(!res.ok){
     if(res.status===400 && /API key/i.test(detail)) throw new Error("Khoá Gemini không hợp lệ.");
+    if(res.status===401 || res.status===403) throw new Error("Khoá Gemini bị từ chối — kiểm tra lại khoá ở tab Khác.");
     if(res.status===429) throw new Error("Hết lượt Gemini hôm nay, thử lại sau.");
+    if(RETRY_ON.includes(res.status)) throw new Error("Gemini đang quá tải, thử lại sau một lát.");
     throw new Error(`Gemini lỗi ${res.status}${detail?": "+detail:""}`);
   }
 
